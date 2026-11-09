@@ -12,6 +12,7 @@ pub const DEFAULTS: &[(&str, &[&str])] = &[
     ("cancel_query", &["escape"]),
     ("format_sql", &["ctrl-shift-f"]),
     ("open_palette", &["ctrl-k", "cmd-k"]),
+    ("toggle_fullscreen", &["f11", "ctrl-cmd-f"]),
 ];
 
 #[derive(Deserialize)]
@@ -84,7 +85,8 @@ mod tests {
         assert!(unknown.is_empty());
         assert!(b.contains(&("run_query".into(), "ctrl-enter".into())));
         assert!(b.contains(&("open_palette".into(), "cmd-k".into())));
-        assert_eq!(b.len(), 6);
+        assert_eq!(b.len(), 8);
+        assert!(b.contains(&("toggle_fullscreen".into(), "f11".into())));
     }
 
     #[test]

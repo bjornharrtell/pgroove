@@ -115,7 +115,7 @@ format_sql = []                       # unbind
 ```
 
 Commands: `run_query` (default `ctrl-enter`), `cancel_query` (`escape`),
-`format_sql` (`ctrl-shift-f`), `open_palette` (`ctrl-k`).
+`format_sql` (`ctrl-shift-f`), `open_palette` (`ctrl-k`), `toggle_fullscreen` (`f11`).
 
 ## Releasing
 

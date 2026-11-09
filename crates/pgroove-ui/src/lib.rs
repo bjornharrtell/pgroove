@@ -22,7 +22,7 @@ pub use workspace::Workspace;
 use gpui_kit::{App, KeyBinding};
 
 pub use query_tab::{CancelQuery, FormatSql, RunQuery};
-pub use workspace::{OpenPalette, Startup, step_cursor};
+pub use workspace::{OpenPalette, Startup, ToggleFullscreen, step_cursor};
 
 /// The action and key context for a command name from `pgroove_core::keys`.
 fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static str>)> {
@@ -31,6 +31,7 @@ fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static 
         "cancel_query" => (Box::new(CancelQuery), Some("QueryTab")),
         "format_sql" => (Box::new(FormatSql), None),
         "open_palette" => (Box::new(OpenPalette), None),
+        "toggle_fullscreen" => (Box::new(ToggleFullscreen), None),
         _ => return None,
     })
 }

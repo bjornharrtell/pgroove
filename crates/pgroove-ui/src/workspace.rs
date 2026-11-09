@@ -85,6 +85,7 @@ actions!(
     workspace,
     [
         OpenPalette,
+        ToggleFullscreen,
         SidebarUp,
         SidebarDown,
         SidebarActivate,
@@ -2668,6 +2669,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
+            .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
             .rounded_tl(radii.top_left)
             .rounded_tr(radii.top_right)
             .rounded_bl(radii.bottom_left)
