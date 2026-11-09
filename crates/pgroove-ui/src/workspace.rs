@@ -1295,6 +1295,10 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
+            .rounded_tl(radii.top_left)
+            .rounded_tr(radii.top_right)
+            .rounded_bl(radii.bottom_left)
+            .rounded_br(radii.bottom_right)
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(window, cx))

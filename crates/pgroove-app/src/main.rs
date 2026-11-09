@@ -36,6 +36,10 @@ fn main() -> anyhow::Result<()> {
                 window_bounds: session.usable_window().map(|(w, h)| {
                     WindowBounds::Windowed(Bounds::centered(None, size(px(w), px(h)), cx))
                 }),
+                // Rounded corners need an alpha surface so the corners and shadow margin
+                // are see-through; every themed surface inside the frame is opaque.
+                #[cfg(target_os = "linux")]
+                window_background: WindowBackgroundAppearance::Transparent,
                 window_decorations: Some(WindowDecorations::Client),
                 ..TitleBar::window_options()
             };
