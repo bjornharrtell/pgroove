@@ -3,6 +3,8 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -224,125 +226,125 @@ impl Workspace {
         });
     }
 
-    fn render_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self
-            .tree
+    fn tree_row(
+        &self,
+        id: impl Into<ElementId>,
+        depth: usize,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        h_flex()
+            .id(id)
+            .gap_1p5()
+            .pl(px(10. + depth as f32 * 14.))
+            .pr_2()
+            .h(px(26.))
+            .items_center()
+            .text_sm()
+            .text_color(cx.theme().sidebar_foreground)
+            .overflow_hidden()
+    }
+
+    fn render_tree_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().sidebar_accent;
+        self.tree
             .rows()
             .into_iter()
             .enumerate()
             .map(|(i, row)| match row {
                 Row::Schema { name, expanded } => {
                     let n = name.clone();
-                    h_flex()
-                        .id(("schema", i))
-                        .gap_1()
-                        .px_2()
-                        .py_0p5()
-                        .items_center()
-                        .text_sm()
+                    self.tree_row(("schema", i), 1, cx)
                         .cursor_pointer()
-                        .hover(|d| d.bg(cx.theme().accent))
-                        .child(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .child(IconName::Folder)
+                        .hover(move |d| d.bg(hover))
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size_4()
+                            .text_color(muted),
+                        )
+                        .child(Icon::new(IconName::Folder).size_4().text_color(muted))
                         .child(name)
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)),
                         )
                         .into_any_element()
                 }
-                Row::Object { name, kind, .. } => h_flex()
-                    .id(("object", i))
-                    .gap_1()
-                    .pl_8()
-                    .pr_2()
-                    .py_0p5()
-                    .items_center()
-                    .text_sm()
-                    .child(match kind {
-                        ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
-                        ObjectKind::Sequence => IconName::Hash,
-                        _ => IconName::Table,
-                    })
+                Row::Object { name, kind, .. } => self
+                    .tree_row(("object", i), 3, cx)
+                    .child(
+                        Icon::new(match kind {
+                            ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
+                            ObjectKind::Sequence => IconName::Hash,
+                            _ => IconName::Table,
+                        })
+                        .size_4()
+                        .text_color(muted),
+                    )
                     .child(name)
                     .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx))
                     .into_any_element(),
                 Row::Message(m) => div()
-                    .pl_8()
-                    .py_0p5()
+                    .pl(px(52.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(muted)
                     .child(m)
                     .into_any_element(),
-            });
-        v_flex()
-            .id("schema-tree")
-            .flex_1()
-            .overflow_y_scroll()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .children(rows)
+            })
+            .collect()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let active = match &self.status {
             Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
             _ => None,
         };
-        let rows = self
-            .store
-            .profiles()
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, p)| {
-                let is_active = active.as_deref() == Some(p.name.as_str());
-                let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
-                h_flex()
-                    .id(("conn", i))
+        let mut items: Vec<AnyElement> = Vec::new();
+        for (i, p) in self.store.profiles().iter().cloned().enumerate() {
+            let is_active = active.as_deref() == Some(p.name.as_str());
+            let connected = is_active && self.client.is_some();
+            let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
+            let hover = theme.sidebar_accent;
+            items.push(
+                self.tree_row(("conn", i), 0, cx)
                     .gap_1()
-                    .px_2()
-                    .py_1()
-                    .items_center()
-                    .when(is_active, |d| d.bg(cx.theme().accent))
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover))
+                    .when(is_active, |d| d.bg(theme.sidebar_accent))
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().child(p.name.clone()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(p.label()),
-                            ),
+                        Icon::new(if connected {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size_4()
+                        .text_color(theme.muted_foreground),
                     )
                     .child(
-                        Button::new(("connect", i))
-                            .ghost()
-                            .xsmall()
-                            .icon(if is_active {
-                                IconName::Unplug
+                        Icon::new(IconName::Server)
+                            .size_4()
+                            .text_color(if connected {
+                                theme.success
                             } else {
-                                IconName::Plug
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if is_active {
-                                    this.disconnect(cx)
-                                } else {
-                                    this.connect(pc.clone(), cx)
-                                }
-                            })),
+                                theme.muted_foreground
+                            }),
                     )
+                    .child(div().flex_1().truncate().child(p.name.clone()))
                     .child(
                         Button::new(("edit", i))
                             .ghost()
                             .xsmall()
                             .icon(IconName::Settings)
+                            .tooltip("Edit connection")
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
                                 this.open_form(Some(pe.clone()), window, cx)
                             })),
                     )
@@ -350,34 +352,184 @@ impl Workspace {
                         Button::new(("delete", i))
                             .ghost()
                             .xsmall()
-                            .icon(IconName::Delete)
-                            .on_click(cx.listener(move |this, _, _, cx| this.delete(&pd, cx))),
+                            .icon(IconName::Trash)
+                            .tooltip("Delete connection")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.delete(&pd, cx)
+                            })),
                     )
-            });
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if is_active {
+                            this.disconnect(cx)
+                        } else {
+                            this.connect(pc.clone(), cx)
+                        }
+                    }))
+                    .into_any_element(),
+            );
+            if is_active {
+                items.extend(self.render_tree_rows(cx));
+            }
+        }
+        if items.is_empty() {
+            items.push(
+                div()
+                    .p_3()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Add a connection to get started.")
+                    .into_any_element(),
+            );
+        }
         v_flex()
             .w(px(260.))
+            .flex_shrink_0()
             .h_full()
+            .bg(theme.sidebar)
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(theme.sidebar_border)
             .child(
                 h_flex()
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .h(px(32.))
                     .justify_between()
                     .items_center()
-                    .child(div().text_sm().child("Connections"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Connections"),
+                    )
                     .child(
                         Button::new("add")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
+                            .tooltip("New connection")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
                             ),
                     ),
             )
-            .children(rows)
-            .child(self.render_tree(cx))
+            .child(
+                v_flex()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(items),
+            )
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (label, color) = match &self.status {
+            Status::Connected { name, .. } => (name.clone(), theme.success),
+            Status::Connecting(n) => (format!("{n}…"), theme.muted_foreground),
+            Status::Failed(_) => ("Connection failed".into(), theme.danger),
+            Status::Idle => ("No connection".into(), theme.muted_foreground),
+        };
+        h_flex()
+            .h(px(40.))
+            .px_3()
+            .gap_3()
+            .items_center()
+            .bg(theme.title_bar)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("pgroove"),
+            )
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .px_2()
+                    .h(px(26.))
+                    .items_center()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_sm()
+                    .child(Icon::new(IconName::Circle).size_3().text_color(color))
+                    .child(label),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("palette")
+                    .outline()
+                    .small()
+                    .icon(IconName::Search)
+                    .label("Command palette · Ctrl+K"),
+            )
+    }
+
+    fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let strip = || {
+            h_flex()
+                .gap_2()
+                .px_3()
+                .h(px(34.))
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+        };
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(
+                TabBar::new("tabs").underline().selected_index(0).child(
+                    Tab::new()
+                        .label("Query 1")
+                        .prefix(Icon::new(IconName::Code).size_4()),
+                ),
+            )
+            .child(
+                strip()
+                    .child(
+                        Button::new("run")
+                            .outline()
+                            .xsmall()
+                            .icon(IconName::Play)
+                            .label("Run · Ctrl+Enter"),
+                    )
+                    .child(Button::new("explain").outline().xsmall().label("Explain"))
+                    .child(Button::new("cancel").ghost().xsmall().label("Cancel")),
+            )
+            .child(
+                div()
+                    .h(px(150.))
+                    .flex_shrink_0()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .font_family(theme.mono_font_family.clone())
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("-- SQL editor arrives in the next milestone"),
+            )
+            .child(
+                strip()
+                    .gap_4()
+                    .text_xs()
+                    .child(div().text_color(theme.foreground).child("Results"))
+                    .child(div().text_color(theme.muted_foreground).child("Messages"))
+                    .child(div().text_color(theme.muted_foreground).child("Plan")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Run a query to see results."),
+            )
     }
 }
 
@@ -391,26 +543,30 @@ fn flatten<T>(r: Result<anyhow::Result<T>, tokio::task::JoinError>) -> Result<T,
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let main = match &self.status {
-            Status::Connected { name, .. } => format!("Connected to {name}"),
-            _ => "No connection open".into(),
+        let theme = cx.theme().clone();
+        let (left, right) = match &self.status {
+            Status::Connected { name, version } => (
+                format!("PostgreSQL {version}"),
+                format!("Connected · {name}"),
+            ),
+            s => (String::new(), s.text()),
         };
         v_flex()
             .size_full()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(self.render_toolbar(cx))
             .child(
                 h_flex()
                     .flex_1()
+                    .min_h_0()
                     .child(self.render_sidebar(cx))
-                    .child(div().flex_1().p_2().child(main)),
+                    .child(self.render_main(cx)),
             )
             .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(self.status.text()),
+                StatusBar::new()
+                    .left(div().text_xs().child(left))
+                    .right(div().text_xs().child(right)),
             )
     }
 }
