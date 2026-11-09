@@ -4,6 +4,7 @@ Name=pgroove
 GenericName=PostgreSQL admin
 Comment=Browse, query and monitor PostgreSQL databases
 Exec=pgroove
+Icon=pgroove
 Terminal=false
 Categories=Development;Database;
 Keywords=postgres;postgresql;sql;database;

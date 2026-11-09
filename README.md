@@ -34,6 +34,16 @@ cargo run --release -p pgroove-app
 On Linux you need the usual GPUI dependencies (Vulkan, Wayland or X11 and xkbcommon headers,
 fontconfig). See `.github/workflows/ci.yml` for the exact package list.
 
+## Downloads
+
+Tagged releases publish a Linux x86_64 AppImage and tarball, a macOS Apple silicon
+(arm64) tarball and a Windows x86_64 zip. The AppImage relies on the system's graphics
+libraries (Vulkan, Wayland or X11); make it executable and run it:
+
+```bash
+chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
+```
+
 ## Files
 
 | File | Location | Purpose |
