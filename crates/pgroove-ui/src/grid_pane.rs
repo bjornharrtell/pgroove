@@ -2,9 +2,12 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use pgroove_core::edit::EditSession;
 use pgroove_core::export;
 use pgroove_core::query::ResultSet;
 
@@ -33,11 +36,18 @@ impl Format {
     }
 }
 
+/// Emitted when staged edits change.
+pub struct GridChanged;
+
 pub struct GridPane {
     grid: Entity<TableState<ResultsTable>>,
     selected: Option<(usize, usize)>,
-    _sub: Subscription,
+    editable: bool,
+    edit_input: Entity<InputState>,
+    _subs: Vec<Subscription>,
 }
+
+impl EventEmitter<GridChanged> for GridPane {}
 
 impl GridPane {
     pub fn new(sortable: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -47,16 +57,80 @@ impl GridPane {
             ResultsTable::default()
         };
         let grid = cx.new(|cx| TableState::new(delegate, window, cx).cell_selectable(true));
-        let sub = cx.subscribe(&grid, |this, _, ev: &TableEvent, cx| {
-            if let TableEvent::SelectCell(r, c) = ev {
-                this.selected = Some((*r, *c));
-                cx.notify();
-            }
-        });
+        let edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+        let subs = vec![
+            cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
+                if let TableEvent::SelectCell(r, c) = ev {
+                    this.selected = Some((*r, *c));
+                    if this.editable {
+                        let text = this
+                            .grid
+                            .read(cx)
+                            .delegate()
+                            .cell(*r, *c)
+                            .unwrap_or_default()
+                            .to_string();
+                        this.edit_input
+                            .update(cx, |i, cx| i.set_value(text, window, cx));
+                    }
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&edit_input, |this, input, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    let v = input.read(cx).value().to_string();
+                    this.stage(Some(v), cx);
+                }
+            }),
+        ];
         Self {
             grid,
             selected: None,
-            _sub: sub,
+            editable: false,
+            edit_input,
+            _subs: subs,
+        }
+    }
+
+    pub fn selected(&self) -> Option<(usize, usize)> {
+        self.selected
+    }
+
+    pub fn set_editable(&mut self, editable: bool, cx: &mut Context<Self>) {
+        if self.editable != editable {
+            self.editable = editable;
+            cx.notify();
+        }
+    }
+
+    /// Installs (or clears) the staged-edit session for the shown data.
+    pub fn set_session(&mut self, session: Option<EditSession>, cx: &mut Context<Self>) {
+        self.grid.update(cx, |g, cx| {
+            g.delegate_mut().set_session(session);
+            g.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    /// Runs `f` on the session, if any, and notifies listeners.
+    pub fn edit_session<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut EditSession) -> R,
+    ) -> Option<R> {
+        let out = self.grid.update(cx, |g, cx| {
+            let r = g.delegate_mut().session_mut().map(f);
+            cx.notify();
+            r
+        });
+        cx.emit(GridChanged);
+        cx.notify();
+        out
+    }
+
+    fn stage(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        if let Some((r, c)) = self.selected {
+            self.edit_session(cx, |s| s.set_value(r, c, value));
         }
     }
 
@@ -152,22 +226,51 @@ impl GridPane {
                                 }),
                         ),
                 )
-                .child(
-                    div()
-                        .id("inspector-value")
-                        .px_3()
-                        .pb_2()
-                        .overflow_y_scroll()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_sm()
-                        .child(match value {
-                            Some(v) => div().child(v),
-                            None => div()
-                                .italic()
-                                .text_color(theme.muted_foreground)
-                                .child("NULL"),
-                        }),
-                ),
+                .when(self.editable, |d| {
+                    d.child(
+                        h_flex()
+                            .px_3()
+                            .pb_2()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().child(Input::new(&self.edit_input)))
+                            .child(
+                                Button::new("stage-value")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Stage")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let v = this.edit_input.read(cx).value().to_string();
+                                        this.stage(Some(v), cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("stage-null")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Set NULL")
+                                    .on_click(cx.listener(|this, _, _, cx| this.stage(None, cx))),
+                            ),
+                    )
+                })
+                .when(!self.editable, |d| {
+                    d.child(
+                        div()
+                            .id("inspector-value")
+                            .px_3()
+                            .pb_2()
+                            .overflow_y_scroll()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_sm()
+                            .child(match value {
+                                Some(v) => div().child(v),
+                                None => div()
+                                    .italic()
+                                    .text_color(theme.muted_foreground)
+                                    .child("NULL"),
+                            }),
+                    )
+                }),
         )
     }
 }

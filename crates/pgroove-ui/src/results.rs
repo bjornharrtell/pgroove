@@ -1,7 +1,9 @@
 //! Result grid backed by gpui-kit's table.
 
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::*;
+use pgroove_core::edit::EditSession;
 use pgroove_core::query::ResultSet;
 
 #[derive(Default)]
@@ -14,6 +16,8 @@ pub struct ResultsTable {
     sorted: Option<(usize, bool)>,
     /// Sort requested by a header click, not yet handled.
     pending_sort: Option<Option<(usize, bool)>>,
+    /// Staged edits; when present, cells are read through it.
+    session: Option<EditSession>,
 }
 
 impl ResultsTable {
@@ -23,6 +27,24 @@ impl ResultsTable {
             sortable: true,
             ..Self::default()
         }
+    }
+
+    pub fn session(&self) -> Option<&EditSession> {
+        self.session.as_ref()
+    }
+
+    pub fn session_mut(&mut self) -> Option<&mut EditSession> {
+        self.session.as_mut()
+    }
+
+    pub fn set_session(&mut self, session: Option<EditSession>) {
+        self.session = session;
+    }
+
+    pub fn row_total(&self) -> usize {
+        self.session
+            .as_ref()
+            .map_or(self.rows.len(), EditSession::row_count)
     }
 
     pub fn names(&self) -> &[String] {
@@ -49,6 +71,7 @@ impl ResultsTable {
     pub fn set(&mut self, set: Option<&ResultSet>) {
         match set {
             Some(s) => {
+                self.session = None;
                 self.names = s.columns.clone();
                 self.columns = s
                     .columns
@@ -69,6 +92,7 @@ impl ResultsTable {
                 self.rows = s.rows.clone();
             }
             None => {
+                self.session = None;
                 self.names.clear();
                 self.columns.clear();
                 self.rows.clear();
@@ -77,6 +101,9 @@ impl ResultsTable {
     }
 
     pub fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        if let Some(s) = &self.session {
+            return s.value(row, col);
+        }
         self.rows.get(row)?.get(col)?.as_deref()
     }
 }
@@ -87,7 +114,7 @@ impl TableDelegate for ResultsTable {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
+        self.row_total()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -114,11 +141,29 @@ impl TableDelegate for ResultsTable {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match self.cell(row_ix, col_ix) {
+        let theme = cx.theme();
+        let (inserted, deleted, edited) =
+            self.session.as_ref().map_or((false, false, false), |s| {
+                (
+                    s.is_inserted(row_ix),
+                    s.is_deleted(row_ix),
+                    s.is_edited(row_ix, col_ix),
+                )
+            });
+        let base = match self.cell(row_ix, col_ix) {
             Some(v) => div().truncate().child(v.to_string()),
             None => div().italic().opacity(0.5).child("NULL"),
+        };
+        if deleted {
+            base.line_through().bg(theme.danger.opacity(0.18))
+        } else if inserted {
+            base.bg(theme.success.opacity(0.18))
+        } else if edited {
+            base.bg(theme.warning.opacity(0.22))
+        } else {
+            base
         }
     }
 }
@@ -146,6 +191,7 @@ mod tests {
         assert!(t.columns.is_empty() && t.rows.is_empty());
         assert_eq!(t.column_name(0), None);
         assert_eq!(t.take_sort(), None);
+        assert!(t.session().is_none());
         t.set_sorted(Some((0, true)));
         assert_eq!(t.sorted, Some((0, true)));
     }

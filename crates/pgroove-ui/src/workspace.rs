@@ -19,6 +19,7 @@ use tokio::runtime::Runtime;
 
 use crate::connections::ConnectionForm;
 use crate::grid_pane::GridPane;
+use crate::mode::ReadOnlyMode;
 use crate::schema_tree::{Row, SchemaTree};
 use crate::structure_view::OpenTable;
 use crate::table_view::TableView;
@@ -120,9 +121,11 @@ impl Workspace {
         self.status = Status::Connecting(profile.name.clone());
         cx.notify();
         let secrets = self.secrets.clone();
+        let read_only = cx.global::<ReadOnlyMode>().0;
         let task = self.runtime.spawn(async move {
             let pw = secrets.get(&profile.name)?;
             let (client, version) = connect(&profile, pw.as_deref()).await?;
+            pgroove_core::edit::set_read_only(&client, read_only).await?;
             anyhow::Ok((profile.name, client, version))
         });
         cx.spawn(async move |this, cx| {
@@ -296,6 +299,19 @@ impl Workspace {
             });
         }
         cx.notify();
+    }
+
+    fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
+        let read_only = !cx.global::<ReadOnlyMode>().0;
+        cx.set_global(ReadOnlyMode(read_only));
+        if let Some(client) = self.client.clone() {
+            self.runtime.spawn(async move {
+                if let Err(e) = pgroove_core::edit::set_read_only(&client, read_only).await {
+                    log::warn!("could not switch read-only mode: {e:#}");
+                }
+            });
+        }
+        cx.refresh_windows();
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
@@ -593,6 +609,22 @@ impl Workspace {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let read_only = cx.global::<ReadOnlyMode>().0;
+        let mode_chip = Button::new("read-only")
+            .xsmall()
+            .outline()
+            .icon(if read_only {
+                IconName::Lock
+            } else {
+                IconName::LockOpen
+            })
+            .label(if read_only { "Read-only" } else { "Editable" })
+            .tooltip(if read_only {
+                "Writes are blocked. Click to allow editing."
+            } else {
+                "Editing is allowed. Click to block writes."
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_read_only(cx)));
         let theme = cx.theme();
         let (label, color) = match &self.status {
             Status::Connected { name, .. } => (name.clone(), theme.success),
@@ -627,6 +659,7 @@ impl Workspace {
                     .child(Icon::new(IconName::Circle).size_3().text_color(color))
                     .child(label),
             )
+            .child(mode_chip)
             .child(div().flex_1())
             .child(
                 Button::new("palette")

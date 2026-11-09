@@ -47,7 +47,7 @@ Key decisions:
 4. **M3 – SQL editor (editor, run, cancel, results grid done; tabs, history, snippets, error position pending):** multi-tab editor, syntax highlight, run selection/all, cancel, multi-statement results, timing, error position, history, saved snippets.
 5. **M4 – Data viewer (done):** virtualized grid, sort/filter/paginate, copy/export (CSV/JSON), cell inspector (json, bytea, long text).
 6. **M5 – Table structure (done; size shown as table/index/total, DDL reconstructed):** columns, indexes, constraints, FKs (navigable), triggers, DDL view, size/stats.
-7. **M6 – Data editing:** inline edit/insert/delete for tables with PK, pending-changes review, transaction wrap, read-only guard.
+7. **M6 – Data editing (done; inline edit via inspector, add/delete rows, review, atomic apply, server-side read-only switch):** inline edit/insert/delete for tables with PK, pending-changes review, transaction wrap, read-only guard.
 8. **M7 – Query tooling:** `EXPLAIN (ANALYZE, BUFFERS)` viewer with plan tree + hot-node highlight, autocomplete (schema-aware), formatter.
 9. **M8 – Server monitoring:** `pg_stat_activity` (cancel/terminate), locks/blocking tree, `pg_stat_statements` top queries, replication, DB/table sizes, settings browser.
 10. **M9 – Polish:** command palette, keybindings config, session restore, packaging (Linux/macOS/Windows), docs.
