@@ -63,8 +63,21 @@ Key decisions:
 - Large result sets and memory: enforce batching/caps from M3.
 - Version differences across Postgres majors in catalog queries: cover with matrix tests (13–18).
 
+## Status
+
+All milestones M0–M9 are implemented.
+
+## Known limitations
+
+- One connection per window; opening another replaces it.
+- JSON export writes every value as a string (the text protocol carries no column types).
+- A new row can't be given an explicit NULL; empty and NULL both mean "use the default".
+- Results are buffered in memory, capped at 10,000 rows per statement.
+- Completion doesn't resolve subqueries or CTE names.
+- Packaging is a release workflow that builds archives; no installers or signing.
+- Not verified by hand: the macOS and Windows builds, and the Wayland window frame.
+
 ## Open questions
 
-- Which `gpui-kit` components exist for table/tree/editor? Audit before M0 ends.
-- Single vs multiple connections per window?
+- Several simultaneous connections per window?
 - License choice.
