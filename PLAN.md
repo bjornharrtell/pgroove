@@ -45,7 +45,7 @@ Key decisions:
 2. **M1 – Connections (done; TLS, URI import, test button pending):** connection form (host/port/db/user/SSL/URI), test connection, keychain storage, connect/disconnect, saved list.
 3. **M2 – Schema browser (schemas/relations done; functions/types/extensions, context menus, refresh pending):** lazy tree for schemas/tables/views/matviews/sequences/functions/types/extensions; context menus; refresh.
 4. **M3 – SQL editor (editor, run, cancel, results grid done; tabs, history, snippets, error position pending):** multi-tab editor, syntax highlight, run selection/all, cancel, multi-statement results, timing, error position, history, saved snippets.
-5. **M4 – Data viewer:** virtualized grid, sort/filter/paginate, copy/export (CSV/JSON), cell inspector (json, bytea, long text).
+5. **M4 – Data viewer (open from tree, paging, server-side sort, filter done; copy/export, cell inspector pending):** virtualized grid, sort/filter/paginate, copy/export (CSV/JSON), cell inspector (json, bytea, long text).
 6. **M5 – Table structure:** columns, indexes, constraints, FKs (navigable), triggers, DDL view, size/stats.
 7. **M6 – Data editing:** inline edit/insert/delete for tables with PK, pending-changes review, transaction wrap, read-only guard.
 8. **M7 – Query tooling:** `EXPLAIN (ANALYZE, BUFFERS)` viewer with plan tree + hot-node highlight, autocomplete (schema-aware), formatter.

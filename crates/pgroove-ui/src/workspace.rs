@@ -12,6 +12,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
+use pgroove_core::data::TableRef;
 use pgroove_core::query::{self, QueryOutput};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
@@ -20,6 +21,7 @@ use tokio::runtime::Runtime;
 use crate::connections::ConnectionForm;
 use crate::results::ResultsTable;
 use crate::schema_tree::{Row, SchemaTree};
+use crate::table_view::TableView;
 
 /// Connection lifecycle shown in the status bar.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -56,6 +58,11 @@ enum BottomTab {
     Messages,
 }
 
+enum TabKind {
+    Query,
+    Table(Entity<TableView>),
+}
+
 /// Top-level window view: sidebar, main area, status bar.
 pub struct Workspace {
     store: ProfileStore,
@@ -69,6 +76,8 @@ pub struct Workspace {
     run: RunState,
     output: Option<QueryOutput>,
     bottom: BottomTab,
+    tabs: Vec<TabKind>,
+    active_tab: usize,
 }
 
 impl Workspace {
@@ -93,6 +102,8 @@ impl Workspace {
             run: RunState::Idle,
             output: None,
             bottom: BottomTab::Results,
+            tabs: vec![TabKind::Query],
+            active_tab: 0,
             store,
             secrets,
             runtime,
@@ -104,6 +115,7 @@ impl Workspace {
 
     fn connect(&mut self, profile: ConnectionProfile, cx: &mut Context<Self>) {
         self.client = None;
+        self.close_table_tabs();
         self.tree.reset();
         self.status = Status::Connecting(profile.name.clone());
         cx.notify();
@@ -175,6 +187,38 @@ impl Workspace {
                 })
                 .detach();
             }
+        }
+        cx.notify();
+    }
+
+    fn close_table_tabs(&mut self) {
+        self.tabs.retain(|t| matches!(t, TabKind::Query));
+        self.active_tab = 0;
+    }
+
+    fn open_table(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
+        let existing = self.tabs.iter().position(|t| match t {
+            TabKind::Table(v) => v.read(cx).table() == &table,
+            TabKind::Query => false,
+        });
+        if let Some(ix) = existing {
+            self.active_tab = ix;
+        } else if let Some(client) = self.client.clone() {
+            let runtime = self.runtime.clone();
+            let view = cx.new(|cx| TableView::new(table, client, runtime, window, cx));
+            self.tabs.push(TabKind::Table(view));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix == 0 || ix >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(ix);
+        if self.active_tab >= ix {
+            self.active_tab = self.active_tab.saturating_sub(1);
         }
         cx.notify();
     }
@@ -254,6 +298,7 @@ impl Workspace {
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
+        self.close_table_tabs();
         self.tree.reset();
         self.status = Status::Idle;
         cx.notify();
@@ -389,8 +434,16 @@ impl Workspace {
                         )
                         .into_any_element()
                 }
-                Row::Object { name, kind, .. } => self
+                Row::Object { schema, name, kind } => self
                     .tree_row(("object", i), 3, cx)
+                    .when(kind != ObjectKind::Sequence, |d| {
+                        let table = TableRef::new(schema.clone(), name.clone());
+                        d.cursor_pointer()
+                            .hover(move |d| d.bg(hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_table(table.clone(), window, cx)
+                            }))
+                    })
                     .child(
                         Icon::new(match kind {
                             ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
@@ -663,7 +716,51 @@ impl Workspace {
         }
     }
 
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut bar = TabBar::new("tabs")
+            .underline()
+            .selected_index(self.active_tab)
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.active_tab = *ix;
+                cx.notify();
+            }));
+        for (ix, kind) in self.tabs.iter().enumerate() {
+            bar = bar.child(match kind {
+                TabKind::Query => Tab::new()
+                    .label("Query 1")
+                    .prefix(Icon::new(IconName::Code).size_4()),
+                TabKind::Table(v) => Tab::new()
+                    .label(v.read(cx).table().name.clone())
+                    .prefix(Icon::new(IconName::Table).size_4())
+                    .suffix(
+                        Button::new(("close", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, cx)
+                            })),
+                    ),
+            });
+        }
+        bar
+    }
+
     fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.tabs.get(self.active_tab) {
+            Some(TabKind::Table(v)) => div().flex_1().min_h_0().child(v.clone()).into_any_element(),
+            _ => self.render_query_tab(cx).into_any_element(),
+        };
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(self.render_tab_bar(cx))
+            .child(content)
+    }
+
+    fn render_query_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let strip = || {
             h_flex()
@@ -676,15 +773,7 @@ impl Workspace {
         };
         v_flex()
             .flex_1()
-            .min_w_0()
-            .h_full()
-            .child(
-                TabBar::new("tabs").underline().selected_index(0).child(
-                    Tab::new()
-                        .label("Query 1")
-                        .prefix(Icon::new(IconName::Code).size_4()),
-                ),
-            )
+            .min_h_0()
             .child(
                 strip()
                     .child(

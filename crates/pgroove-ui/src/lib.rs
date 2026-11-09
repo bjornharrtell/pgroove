@@ -3,6 +3,7 @@
 mod connections;
 mod results;
 mod schema_tree;
+mod table_view;
 mod workspace;
 
 pub use workspace::Workspace;
