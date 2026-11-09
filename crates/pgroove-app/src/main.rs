@@ -4,6 +4,7 @@ use gpui_kit::component::{Theme, TitleBar};
 use gpui_kit::*;
 use pgroove_core::ProfileStore;
 use pgroove_core::secrets::KeyringStore;
+use pgroove_core::session::SessionState;
 use pgroove_ui::Workspace;
 
 /// Corner radius of the application window.
@@ -20,6 +21,11 @@ fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(tokio::runtime::Runtime::new()?);
     let path = ProfileStore::default_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
     let store = ProfileStore::load(path)?;
+    let session_path = SessionState::default_path();
+    let session = session_path
+        .as_deref()
+        .map(SessionState::load)
+        .unwrap_or_default();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
@@ -27,6 +33,9 @@ fn main() -> anyhow::Result<()> {
             sync_theme(None, cx);
             pgroove_ui::init(cx);
             let options = WindowOptions {
+                window_bounds: session.usable_window().map(|(w, h)| {
+                    WindowBounds::Windowed(Bounds::centered(None, size(px(w), px(h)), cx))
+                }),
                 window_decorations: Some(WindowDecorations::Client),
                 ..TitleBar::window_options()
             };
@@ -34,7 +43,17 @@ fn main() -> anyhow::Result<()> {
                 window
                     .observe_window_appearance(|window, cx| sync_theme(Some(window), cx))
                     .detach();
-                cx.new(|cx| Workspace::new(store, Arc::new(KeyringStore), runtime, window, cx))
+                cx.new(|cx| {
+                    Workspace::new(
+                        store,
+                        Arc::new(KeyringStore),
+                        runtime,
+                        session,
+                        session_path,
+                        window,
+                        cx,
+                    )
+                })
             })
             .expect("failed to open window");
             log::info!("pgroove started");

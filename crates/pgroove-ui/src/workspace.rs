@@ -17,6 +17,7 @@ use pgroove_core::catalog::ObjectKind;
 use pgroove_core::data::TableRef;
 use pgroove_core::history::{History, Snippets};
 use pgroove_core::secrets::SecretStore;
+use pgroove_core::session::SessionState;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
@@ -72,6 +73,10 @@ pub struct Workspace {
     history: Arc<Mutex<History>>,
     snippets: Arc<Mutex<Snippets>>,
     next_query: usize,
+    session_path: Option<std::path::PathBuf>,
+    window_size: Option<(f32, f32)>,
+    /// Table tabs to reopen once the restored connection is up.
+    pending_tables: Vec<TableRef>,
 }
 
 impl Workspace {
@@ -79,6 +84,8 @@ impl Workspace {
         store: ProfileStore,
         secrets: Arc<dyn SecretStore>,
         runtime: Arc<Runtime>,
+        session: SessionState,
+        session_path: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -101,20 +108,43 @@ impl Workspace {
             Arc::new(Mutex::new(history)),
             Arc::new(Mutex::new(snippets)),
         );
-        let first = cx.new(|cx| {
-            QueryTab::new(
-                runtime.clone(),
-                completions.clone(),
-                history.clone(),
-                snippets.clone(),
-                window,
-                cx,
-            )
-        });
-        Self {
-            tabs: vec![TabKind::Query(first, 1)],
+        let texts = if session.queries.is_empty() {
+            vec![String::new()]
+        } else {
+            session.queries.clone()
+        };
+        let tabs: Vec<TabKind> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let tab = cx.new(|cx| {
+                    QueryTab::new(
+                        runtime.clone(),
+                        completions.clone(),
+                        history.clone(),
+                        snippets.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                if !text.is_empty() {
+                    tab.update(cx, |t, cx| t.set_text(text, window, cx));
+                }
+                TabKind::Query(tab, i + 1)
+            })
+            .collect();
+        let next_query = tabs.len() + 1;
+        let mut this = Self {
+            tabs,
             active_tab: 0,
-            next_query: 2,
+            next_query,
+            session_path,
+            window_size: None,
+            pending_tables: session
+                .tables
+                .iter()
+                .map(|(s, n)| TableRef::new(s.clone(), n.clone()))
+                .collect(),
             completions,
             history,
             snippets,
@@ -124,6 +154,58 @@ impl Workspace {
             status: Status::Idle,
             client: None,
             tree: SchemaTree::default(),
+        };
+        cx.on_app_quit(|this, cx| {
+            this.save_session(cx);
+            async {}
+        })
+        .detach();
+        if let Some(name) = &session.connection
+            && let Some(p) = this
+                .store
+                .profiles()
+                .iter()
+                .find(|p| &p.name == name)
+                .cloned()
+        {
+            this.connect(p, cx);
+        }
+        this
+    }
+
+    /// Writes the restorable state (open queries and tables, connection, window size).
+    fn save_session(&self, cx: &App) {
+        let Some(path) = &self.session_path else {
+            return;
+        };
+        let state = SessionState {
+            connection: match &self.status {
+                Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
+                _ => None,
+            },
+            queries: self
+                .tabs
+                .iter()
+                .filter_map(|t| match t {
+                    TabKind::Query(q, _) => Some(q.read(cx).text(cx)),
+                    _ => None,
+                })
+                .collect(),
+            tables: self
+                .tabs
+                .iter()
+                .filter_map(|t| match t {
+                    TabKind::Table(v) => {
+                        let t = v.read(cx).table();
+                        Some((t.schema.clone(), t.name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            window: self.window_size,
+        };
+        if let Err(e) = state.save(path) {
+            log::warn!("could not save session: {e:#}");
         }
     }
 
@@ -155,6 +237,7 @@ impl Workspace {
                     Ok((name, client, version)) => {
                         this.client = Some(Arc::new(client));
                         this.sync_query_clients(cx);
+                        this.save_session(cx);
                         this.status = Status::Connected { name, version };
                         this.load_schemas(cx);
                         this.load_completions(cx);
@@ -367,6 +450,7 @@ impl Workspace {
             self.tabs.push(TabKind::Table(view));
             self.active_tab = self.tabs.len() - 1;
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -394,6 +478,7 @@ impl Workspace {
         if self.active_tab >= ix {
             self.active_tab = self.active_tab.saturating_sub(1);
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -1188,6 +1273,13 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let radii = window_corner_radii(window, cx);
+        let size = window.bounds().size;
+        self.window_size = Some((f32::from(size.width), f32::from(size.height)));
+        if self.client.is_some() && !self.pending_tables.is_empty() {
+            for t in std::mem::take(&mut self.pending_tables) {
+                self.open_table(t, window, cx);
+            }
+        }
         let (left, right) = match &self.status {
             Status::Connected { name, version } => (
                 format!("PostgreSQL {version}"),

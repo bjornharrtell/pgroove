@@ -14,6 +14,7 @@ pub mod monitor;
 pub mod profile;
 pub mod query;
 pub mod secrets;
+pub mod session;
 pub mod store;
 pub mod structure;
 

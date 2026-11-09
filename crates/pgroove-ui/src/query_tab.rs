@@ -131,6 +131,15 @@ impl QueryTab {
         cx.notify();
     }
 
+    pub(crate) fn text(&self, cx: &App) -> String {
+        self.editor.read(cx).value().to_string()
+    }
+
+    pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |e, cx| e.set_value(text.to_string(), window, cx));
+    }
+
     /// Appends text to the editor, separated by a blank line when it isn't empty.
     pub fn append(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.editor.read(cx).value().to_string();
