@@ -23,7 +23,7 @@ Requires PostgreSQL 13 or newer on the server.
 - **Monitoring:** sessions (cancel and terminate), blocking locks, `pg_stat_statements`,
   database and table sizes, replication, settings.
 - **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme switchable from the command palette, command palette
-  (`Ctrl+K`), restores open tabs and window size.
+  (`Ctrl+K`), restores your open databases, tabs (queries, tables, activity monitors, the one in front), expanded schemas, search text and window layout.
 
 ## Build and run
 
@@ -76,6 +76,12 @@ Turn the startup check off from the command palette ("Turn off automatic update 
 by setting `check_for_updates = false` in `settings.toml`, or with the environment variable
 `PGROOVE_NO_UPDATE_CHECK=1`. "Check for updates" in the palette checks on demand.
 `PGROOVE_UPDATE_URL` points the check at another release feed.
+
+## Keyboard
+
+Click the schema tree (or press Down from the search box) and use the arrow keys: Up and Down move
+the cursor, Right and Left expand and collapse, Enter does what a click does (open a table, expand
+a schema, show a function's definition). The table open in the front tab is highlighted in the tree.
 
 ## Layout
 

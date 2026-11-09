@@ -14,6 +14,32 @@ pub struct SessionTable {
     pub name: String,
 }
 
+/// A schema that was expanded in the tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionExpanded {
+    pub connection: String,
+    pub database: String,
+    pub schema: String,
+}
+
+/// Which tab was in front.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ActiveTab {
+    /// The n-th query tab (0-based).
+    Query { index: usize },
+    Table {
+        connection: String,
+        database: String,
+        schema: String,
+        name: String,
+    },
+    Activity {
+        connection: String,
+        database: String,
+    },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
     /// Open databases as `(profile name, database)`, reconnected at startup.
@@ -34,6 +60,18 @@ pub struct SessionState {
     /// Height of the SQL editor pane, in logical pixels.
     #[serde(default)]
     pub editor_height: Option<f32>,
+    /// Open activity monitors as `(profile name, database)`.
+    #[serde(default)]
+    pub activity: Vec<(String, String)>,
+    /// Schemas expanded in the tree.
+    #[serde(default)]
+    pub expanded: Vec<SessionExpanded>,
+    /// The tab that was in front.
+    #[serde(default)]
+    pub active: Option<ActiveTab>,
+    /// Text in the tree's search box.
+    #[serde(default)]
+    pub tree_filter: Option<String>,
 }
 
 /// Default and allowed sizes of the resizable panes, in logical pixels.
@@ -118,9 +156,37 @@ mod tests {
             window: Some((1200.0, 800.0)),
             sidebar_width: Some(300.0),
             editor_height: Some(220.0),
+            activity: vec![("prod".into(), "shop".into())],
+            expanded: vec![SessionExpanded {
+                connection: "prod".into(),
+                database: "shop".into(),
+                schema: "public".into(),
+            }],
+            active: Some(ActiveTab::Table {
+                connection: "prod".into(),
+                database: "shop".into(),
+                schema: "public".into(),
+                name: "orders".into(),
+            }),
+            tree_filter: Some("ord".into()),
         };
         s.save(&path).unwrap();
         assert_eq!(SessionState::load(&path), s);
+        // Each kind of active tab survives a round trip.
+        for active in [
+            ActiveTab::Query { index: 2 },
+            ActiveTab::Activity {
+                connection: "a".into(),
+                database: "b".into(),
+            },
+        ] {
+            let t = SessionState {
+                active: Some(active),
+                ..SessionState::default()
+            };
+            t.save(&path).unwrap();
+            assert_eq!(SessionState::load(&path), t);
+        }
         std::fs::write(&path, "queries = 3").unwrap();
         assert_eq!(SessionState::load(&path), SessionState::default());
         let _ = SessionState::default_path();

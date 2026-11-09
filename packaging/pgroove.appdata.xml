@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.bjornharrtell.pgroove</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>pgroove</name>
+  <summary>Native PostgreSQL admin UI</summary>
+  <description>
+    <p>
+      pgroove is a fast, native PostgreSQL client written in Rust. Browse schemas, run SQL with
+      completion and explain plans, view and edit table data, and watch server activity.
+    </p>
+    <ul>
+      <li>Schema browser with search, several databases open at once</li>
+      <li>SQL editor with row limits and streaming CSV export</li>
+      <li>Reviewed, atomic row edits; read-only by default</li>
+      <li>Activity monitor with cancel and terminate</li>
+      <li>Light and dark themes</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">pgroove.desktop</launchable>
+  <developer id="io.github.bjornharrtell">
+    <name>Björn Harrtell</name>
+  </developer>
+  <url type="homepage">https://github.com/bjornharrtell/pgroove</url>
+  <url type="bugtracker">https://github.com/bjornharrtell/pgroove/issues</url>
+  <provides>
+    <binary>pgroove</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+</component>

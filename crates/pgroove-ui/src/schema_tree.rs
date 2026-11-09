@@ -145,6 +145,13 @@ impl SchemaTree {
         category.default_open() != self.toggled.contains(&(schema.to_string(), category))
     }
 
+    /// Names of the expanded schemas, sorted.
+    pub fn expanded_schemas(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.expanded.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Sets the search text; an empty text leaves search mode.
     pub fn set_filter(&mut self, text: &str) {
         let t = text.trim().to_lowercase();
@@ -579,6 +586,17 @@ mod tests {
             rows.last(),
             Some(&Row::Message("…and 200 more. Narrow the search.".into()))
         );
+    }
+
+    #[test]
+    fn expanded_schemas_are_listed_sorted() {
+        let mut t = SchemaTree::default();
+        assert!(t.expanded_schemas().is_empty());
+        t.toggle("public");
+        t.toggle("audit");
+        assert_eq!(t.expanded_schemas(), ["audit", "public"]);
+        t.toggle("audit");
+        assert_eq!(t.expanded_schemas(), ["public"]);
     }
 
     #[test]

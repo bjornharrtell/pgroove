@@ -20,7 +20,7 @@ use pgroove_core::catalog::ObjectKind;
 use pgroove_core::data::TableRef;
 use pgroove_core::history::{History, Snippets};
 use pgroove_core::secrets::SecretStore;
-use pgroove_core::session::SessionState;
+use pgroove_core::session::{ActiveTab, SessionExpanded, SessionState};
 use pgroove_core::settings::{Appearance, Settings};
 use pgroove_core::update::{self, Release};
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
@@ -81,7 +81,30 @@ impl DbSession {
     }
 }
 
-actions!(workspace, [OpenPalette]);
+actions!(
+    workspace,
+    [
+        OpenPalette,
+        SidebarUp,
+        SidebarDown,
+        SidebarActivate,
+        SidebarExpand,
+        SidebarCollapse
+    ]
+);
+
+/// Moves a list cursor by `delta` rows, staying inside `0..len`. With no cursor yet, moving
+/// down selects the first row and moving up the last.
+pub fn step_cursor(current: Option<usize>, len: usize, delta: isize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current {
+        None if delta >= 0 => 0,
+        None => len - 1,
+        Some(c) => (c.min(len - 1) as isize + delta).clamp(0, len as isize - 1) as usize,
+    })
+}
 
 /// Where the self-update process stands.
 #[derive(Clone, Debug)]
@@ -105,6 +128,7 @@ fn leaf_indent(parent_depth: usize) -> f32 {
     TREE_BASE + parent_depth as f32 * INDENT_STEP + CHEVRON_WIDTH
 }
 
+#[derive(Clone)]
 enum SidebarItem {
     Connection(usize, ConnectionProfile),
     Database {
@@ -145,6 +169,14 @@ pub struct Workspace {
     session_path: Option<std::path::PathBuf>,
     window_size: Option<(f32, f32)>,
     pending_tables: Vec<PendingTable>,
+    /// Activity monitors, expanded schemas and the front tab to restore once their databases connect.
+    pending_activity: Vec<(String, String)>,
+    pending_expanded: Vec<SessionExpanded>,
+    pending_active: Option<ActiveTab>,
+    /// Keyboard focus and cursor of the sidebar tree.
+    sidebar_focus: FocusHandle,
+    sidebar_scroll: UniformListScrollHandle,
+    cursor: Option<usize>,
     update: UpdateState,
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
@@ -256,12 +288,21 @@ impl Workspace {
             }
         })
         .detach();
+        if let Some(text) = &session.tree_filter {
+            tree_filter.update(cx, |i, cx| i.set_value(text.clone(), window, cx));
+        }
         let mut this = Self {
             tabs,
             active_tab: 0,
             next_query,
             session_path,
             window_size: None,
+            pending_activity: session.activity.clone(),
+            pending_expanded: session.expanded.clone(),
+            pending_active: session.active.clone(),
+            sidebar_focus: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            cursor: None,
             pending_tables: session
                 .tables
                 .iter()
@@ -354,16 +395,106 @@ impl Workspace {
     }
 
     /// Writes the restorable state (open databases, queries, tables, window size).
+    /// Describes the front tab so it can be found again after a restart.
+    fn active_descriptor(&self, cx: &App) -> Option<ActiveTab> {
+        match self.tabs.get(self.active_tab)? {
+            TabKind::Query(..) => {
+                let index = self.tabs[..self.active_tab]
+                    .iter()
+                    .filter(|t| matches!(t, TabKind::Query(..)))
+                    .count();
+                Some(ActiveTab::Query { index })
+            }
+            TabKind::Table(v, sid) => {
+                let s = self.session(*sid)?;
+                let t = v.read(cx).table();
+                Some(ActiveTab::Table {
+                    connection: s.profile.name.clone(),
+                    database: s.profile.database.clone(),
+                    schema: t.schema.clone(),
+                    name: t.name.clone(),
+                })
+            }
+            TabKind::Activity(_, sid) => {
+                let s = self.session(*sid)?;
+                Some(ActiveTab::Activity {
+                    connection: s.profile.name.clone(),
+                    database: s.profile.database.clone(),
+                })
+            }
+        }
+    }
+
+    /// Writes the restorable state: open databases, tabs, tree state, layout and window size.
+    /// Items still waiting to be restored are kept so an early save doesn't lose them.
     fn save_session(&self, cx: &App) {
         let Some(path) = &self.session_path else {
             return;
         };
-        let state = SessionState {
-            connections: self
-                .sessions
+        let mut tables: Vec<pgroove_core::session::SessionTable> = self
+            .tabs
+            .iter()
+            .filter_map(|t| match t {
+                TabKind::Table(v, sid) => {
+                    let s = self.session(*sid)?;
+                    let t = v.read(cx).table();
+                    Some(pgroove_core::session::SessionTable {
+                        connection: s.profile.name.clone(),
+                        database: s.profile.database.clone(),
+                        schema: t.schema.clone(),
+                        name: t.name.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        tables.extend(
+            self.pending_tables
                 .iter()
-                .map(|s| (s.profile.name.clone(), s.profile.database.clone()))
-                .collect(),
+                .map(|p| pgroove_core::session::SessionTable {
+                    connection: p.connection.clone(),
+                    database: p.database.clone(),
+                    schema: p.table.schema.clone(),
+                    name: p.table.name.clone(),
+                }),
+        );
+        let mut activity: Vec<(String, String)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| match t {
+                TabKind::Activity(_, sid) => {
+                    let s = self.session(*sid)?;
+                    Some((s.profile.name.clone(), s.profile.database.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        activity.extend(self.pending_activity.iter().cloned());
+        let mut expanded: Vec<SessionExpanded> = self
+            .sessions
+            .iter()
+            .flat_map(|s| {
+                s.tree
+                    .expanded_schemas()
+                    .into_iter()
+                    .map(|schema| SessionExpanded {
+                        connection: s.profile.name.clone(),
+                        database: s.profile.database.clone(),
+                        schema,
+                    })
+            })
+            .collect();
+        expanded.extend(self.pending_expanded.iter().cloned());
+        let filter = self.tree_filter.read(cx).value().to_string();
+        // Every saved connection gets a session at startup, so this list stays complete even
+        // while databases are still connecting or have failed.
+        let connections: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.profile.name.clone(), s.profile.database.clone()))
+            .collect();
+        let state = SessionState {
+            connections,
             queries: self
                 .tabs
                 .iter()
@@ -372,26 +503,17 @@ impl Workspace {
                     _ => None,
                 })
                 .collect(),
-            tables: self
-                .tabs
-                .iter()
-                .filter_map(|t| match t {
-                    TabKind::Table(v, sid) => {
-                        let s = self.session(*sid)?;
-                        let t = v.read(cx).table();
-                        Some(pgroove_core::session::SessionTable {
-                            connection: s.profile.name.clone(),
-                            database: s.profile.database.clone(),
-                            schema: t.schema.clone(),
-                            name: t.name.clone(),
-                        })
-                    }
-                    _ => None,
-                })
-                .collect(),
+            tables,
             window: self.window_size,
             sidebar_width: Some(self.sidebar_width),
             editor_height: Some(self.editor_height),
+            activity,
+            expanded,
+            active: self
+                .pending_active
+                .clone()
+                .or_else(|| self.active_descriptor(cx)),
+            tree_filter: (!filter.trim().is_empty()).then_some(filter),
         };
         if let Err(e) = state.save(path) {
             log::warn!("could not save session: {e:#}");
@@ -643,6 +765,111 @@ impl Workspace {
         .detach();
     }
 
+    /// The id of a ready session for a connection profile and database.
+    fn ready_session_for(&self, connection: &str, database: &str) -> Option<usize> {
+        self.sessions
+            .iter()
+            .find(|s| {
+                s.client.is_some() && s.profile.name == connection && s.profile.database == database
+            })
+            .map(|s| s.id)
+    }
+
+    /// Reopens what was open last time as its database connects: table tabs, activity
+    /// monitors, expanded schemas, and finally the tab that was in front.
+    fn restore_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_tables.is_empty()
+            && self.pending_activity.is_empty()
+            && self.pending_expanded.is_empty()
+            && self.pending_active.is_none()
+        {
+            return;
+        }
+        for p in std::mem::take(&mut self.pending_tables) {
+            match self.ready_session_for(&p.connection, &p.database) {
+                Some(sid) => self.open_table(sid, p.table, window, cx),
+                None => self.pending_tables.push(p),
+            }
+        }
+        for (c, d) in std::mem::take(&mut self.pending_activity) {
+            match self.ready_session_for(&c, &d) {
+                Some(sid) => self.open_activity(sid, window, cx),
+                None => self.pending_activity.push((c, d)),
+            }
+        }
+        for e in std::mem::take(&mut self.pending_expanded) {
+            match self.ready_session_for(&e.connection, &e.database) {
+                Some(sid) => {
+                    let open = self
+                        .session(sid)
+                        .is_some_and(|s| s.tree.expanded_schemas().contains(&e.schema));
+                    if !open {
+                        self.toggle_schema(sid, e.schema, cx);
+                    }
+                }
+                None => self.pending_expanded.push(e),
+            }
+        }
+        // Items whose database never connected would wait forever; give up once nothing is
+        // still connecting.
+        let connecting = self
+            .sessions
+            .iter()
+            .any(|s| matches!(s.status, SessionStatus::Connecting));
+        if !connecting {
+            self.pending_tables.clear();
+            self.pending_activity.clear();
+            self.pending_expanded.clear();
+        }
+        if self.pending_tables.is_empty()
+            && self.pending_activity.is_empty()
+            && let Some(active) = self.pending_active.take()
+        {
+            if let Some(ix) = self.find_tab(&active, cx) {
+                self.active_tab = ix;
+            }
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
+    /// Finds the tab matching a saved descriptor.
+    fn find_tab(&self, active: &ActiveTab, cx: &App) -> Option<usize> {
+        match active {
+            ActiveTab::Query { index } => self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| matches!(t, TabKind::Query(..)))
+                .nth(*index)
+                .map(|(i, _)| i),
+            ActiveTab::Table {
+                connection,
+                database,
+                schema,
+                name,
+            } => {
+                let sid = self.ready_session_for(connection, database)?;
+                self.tabs.iter().position(|t| match t {
+                    TabKind::Table(v, s) => {
+                        let t = v.read(cx).table();
+                        *s == sid && t.schema == *schema && t.name == *name
+                    }
+                    _ => false,
+                })
+            }
+            ActiveTab::Activity {
+                connection,
+                database,
+            } => {
+                let sid = self.ready_session_for(connection, database)?;
+                self.tabs
+                    .iter()
+                    .position(|t| matches!(t, TabKind::Activity(_, s) if *s == sid))
+            }
+        }
+    }
+
     /// Applies the search box text to every open database.
     fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
         let text = self.tree_filter.read(cx).value().to_string();
@@ -650,6 +877,7 @@ impl Workspace {
         for id in ids {
             self.sync_filter(id, &text, cx);
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -818,6 +1046,7 @@ impl Workspace {
         if fetch {
             self.fetch_objects(sid, schema, cx);
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -1788,8 +2017,8 @@ impl Workspace {
         row.into_any_element()
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+    /// The rows of the sidebar tree, top to bottom.
+    fn sidebar_items(&self) -> Vec<SidebarItem> {
         let mut items: Vec<SidebarItem> = Vec::new();
         for (i, p) in self.store.profiles().iter().cloned().enumerate() {
             let open: Vec<&DbSession> = self
@@ -1836,36 +2065,167 @@ impl Workspace {
                 }
             }
         }
+        items
+    }
+
+    /// The table shown in the front tab, with the database it belongs to.
+    fn active_table(&self, cx: &App) -> Option<(usize, TableRef)> {
+        match self.tabs.get(self.active_tab)? {
+            TabKind::Table(v, sid) => Some((*sid, v.read(cx).table().clone())),
+            _ => None,
+        }
+    }
+
+    /// Whether a sidebar row is expanded (`None` for rows that can't expand).
+    fn item_expanded(&self, item: &SidebarItem) -> Option<bool> {
+        match item {
+            SidebarItem::Connection(_, p) => {
+                Some(self.sessions.iter().any(|s| s.profile.name == p.name))
+            }
+            SidebarItem::Database { session, .. } => Some(session.is_some()),
+            SidebarItem::Tree(
+                _,
+                _,
+                Row::Schema { expanded, .. }
+                | Row::Category { expanded, .. }
+                | Row::ExtensionsHeader { expanded, .. },
+            ) => Some(*expanded),
+            _ => None,
+        }
+    }
+
+    /// Does what clicking the row does.
+    fn activate_item(&mut self, item: &SidebarItem, window: &mut Window, cx: &mut Context<Self>) {
+        match item {
+            SidebarItem::Connection(_, p) => {
+                if self.sessions.iter().any(|s| s.profile.name == p.name) {
+                    self.close_profile(&p.name, cx);
+                } else {
+                    self.open_session(p.clone(), cx);
+                }
+            }
+            SidebarItem::Database { profile, session } => match session {
+                Some(id) => self.close_session(*id, cx),
+                None => {
+                    self.open_session(profile.clone(), cx);
+                }
+            },
+            SidebarItem::Tree(sid, _, row) => match row {
+                Row::Schema { name, .. } => self.toggle_schema(*sid, name.clone(), cx),
+                Row::Category {
+                    schema, category, ..
+                } => {
+                    if let Some(s) = self.session_mut(*sid) {
+                        s.tree.toggle_category(schema, *category);
+                    }
+                    cx.notify();
+                }
+                Row::ExtensionsHeader { .. } => {
+                    if let Some(s) = self.session_mut(*sid) {
+                        s.tree.toggle_extensions();
+                    }
+                    cx.notify();
+                }
+                Row::Object { schema, name, kind } => {
+                    if kind.is_relation() {
+                        let table = TableRef::new(schema.clone(), name.clone());
+                        self.open_table(*sid, table, window, cx);
+                    } else if matches!(
+                        kind,
+                        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::EnumType
+                    ) {
+                        self.show_definition(*sid, schema.clone(), name.clone(), *kind, window, cx);
+                    }
+                }
+                Row::Extension { .. } | Row::Message(_) => {}
+            },
+            SidebarItem::Note(_) => {}
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.sidebar_items().len();
+        self.cursor = step_cursor(self.cursor, len, delta);
+        if let Some(c) = self.cursor {
+            self.sidebar_scroll
+                .scroll_to_item(c, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    /// Right and left arrows: expand a collapsed row, or collapse an expanded one.
+    fn expand_cursor(&mut self, expand: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.sidebar_items();
+        let Some(item) = self.cursor.and_then(|c| items.get(c)) else {
+            return;
+        };
+        if self.item_expanded(item) == Some(!expand) {
+            self.activate_item(item, window, cx);
+        }
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let items = self.sidebar_items();
         let empty = items.is_empty();
         let items = Rc::new(items);
         let count = items.len();
         let list = uniform_list(
             "sidebar-rows",
             count,
-            cx.processor(move |this, range: Range<usize>, _, cx| {
+            cx.processor(move |this, range: Range<usize>, window, cx| {
+                let theme = cx.theme().clone();
+                let open_table = this.active_table(cx);
+                let focused = this.sidebar_focus.contains_focused(window, cx);
                 range
-                    .map(|ix| match &items[ix] {
-                        SidebarItem::Connection(i, p) => this.connection_row(*i, p.clone(), cx),
-                        SidebarItem::Database { profile, session } => {
-                            this.database_row(ix, profile.clone(), *session, cx)
-                        }
-                        SidebarItem::Tree(sid, j, r) => {
-                            this.render_tree_item(*sid, *j, r.clone(), cx)
-                        }
-                        SidebarItem::Note(m) => div()
-                            .pl(px(leaf_indent(2)))
+                    .map(|ix| {
+                        let element = match &items[ix] {
+                            SidebarItem::Connection(i, p) => this.connection_row(*i, p.clone(), cx),
+                            SidebarItem::Database { profile, session } => {
+                                this.database_row(ix, profile.clone(), *session, cx)
+                            }
+                            SidebarItem::Tree(sid, j, r) => {
+                                this.render_tree_item(*sid, *j, r.clone(), cx)
+                            }
+                            SidebarItem::Note(m) => div()
+                                .pl(px(leaf_indent(2)))
+                                .h(px(26.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(m.clone())
+                                .into_any_element(),
+                        };
+                        // The table open in the front tab is marked; the keyboard cursor
+                        // shows only while the sidebar has focus.
+                        let is_open = matches!(
+                            (&items[ix], &open_table),
+                            (
+                                SidebarItem::Tree(sid, _, Row::Object { schema, name, .. }),
+                                Some((open_sid, t)),
+                            ) if sid == open_sid && *schema == t.schema && *name == t.name
+                        );
+                        let is_cursor = focused && this.cursor == Some(ix);
+                        div()
+                            .w_full()
                             .h(px(26.))
                             .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(m.clone())
-                            .into_any_element(),
+                            .border_l_2()
+                            .border_color(if is_cursor {
+                                theme.primary
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .when(is_open, |d| d.bg(theme.list_active))
+                            .when(is_cursor, |d| d.bg(theme.sidebar_accent))
+                            .child(element)
                     })
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(&self.sidebar_scroll)
         .size_full();
         let body = if empty {
             div()
@@ -1879,6 +2239,22 @@ impl Workspace {
         };
         v_flex()
             .size_full()
+            .track_focus(&self.sidebar_focus)
+            .key_context("Sidebar")
+            .on_action(cx.listener(|this, _: &SidebarUp, _, cx| this.move_cursor(-1, cx)))
+            .on_action(cx.listener(|this, _: &SidebarDown, _, cx| this.move_cursor(1, cx)))
+            .on_action(cx.listener(|this, _: &SidebarActivate, window, cx| {
+                let items = this.sidebar_items();
+                if let Some(item) = this.cursor.and_then(|c| items.get(c)) {
+                    this.activate_item(item, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SidebarExpand, window, cx| {
+                this.expand_cursor(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SidebarCollapse, window, cx| {
+                this.expand_cursor(false, window, cx)
+            }))
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.sidebar_border)
@@ -1923,7 +2299,21 @@ impl Workspace {
                     .pb_1()
                     .child(Input::new(&self.tree_filter).small()),
             )
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .id("sidebar-list")
+                    .flex_1()
+                    .min_h_0()
+                    // Clicking the tree gives it keyboard focus (the search box keeps its own).
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.focus(&this.sidebar_focus, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(body),
+            )
     }
 
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2169,6 +2559,7 @@ impl Workspace {
             .selected_index(self.active_tab)
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 this.active_tab = *ix;
+                this.save_session(cx);
                 cx.notify();
             }));
         for (ix, kind) in self.tabs.iter().enumerate() {
@@ -2287,25 +2678,7 @@ impl Render for Workspace {
         let radii = window_corner_radii(window, cx);
         let size = window.bounds().size;
         self.window_size = Some((f32::from(size.width), f32::from(size.height)));
-        let ready: Vec<(usize, usize)> = self
-            .pending_tables
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, p)| {
-                self.sessions
-                    .iter()
-                    .find(|s| {
-                        s.client.is_some()
-                            && s.profile.name == p.connection
-                            && s.profile.database == p.database
-                    })
-                    .map(|s| (ix, s.id))
-            })
-            .collect();
-        for (ix, sid) in ready.into_iter().rev() {
-            let p = self.pending_tables.remove(ix);
-            self.open_table(sid, p.table, window, cx);
-        }
+        self.restore_pending(window, cx);
         let (left, right) = match self.focused_session(cx).and_then(|id| self.session(id)) {
             Some(s) => match &s.status {
                 SessionStatus::Ready { version } => (
@@ -2362,7 +2735,24 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionStatus, leaf_indent};
+    use super::{SessionStatus, leaf_indent, step_cursor};
+
+    #[test]
+    fn cursor_steps_stay_in_range() {
+        assert_eq!(step_cursor(None, 0, 1), None, "an empty list has no cursor");
+        assert_eq!(step_cursor(None, 5, 1), Some(0));
+        assert_eq!(step_cursor(None, 5, -1), Some(4));
+        assert_eq!(step_cursor(Some(0), 5, -1), Some(0), "clamped at the top");
+        assert_eq!(step_cursor(Some(4), 5, 1), Some(4), "clamped at the bottom");
+        assert_eq!(step_cursor(Some(2), 5, 1), Some(3));
+        assert_eq!(step_cursor(Some(2), 5, -1), Some(1));
+        assert_eq!(
+            step_cursor(Some(9), 5, 0),
+            Some(4),
+            "a stale cursor is pulled back in"
+        );
+        assert_eq!(step_cursor(Some(3), 0, 1), None);
+    }
 
     #[test]
     fn leaf_icons_align_with_the_parent_icon() {

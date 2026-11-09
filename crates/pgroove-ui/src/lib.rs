@@ -22,7 +22,7 @@ pub use workspace::Workspace;
 use gpui_kit::{App, KeyBinding};
 
 pub use query_tab::{CancelQuery, FormatSql, RunQuery};
-pub use workspace::{OpenPalette, Startup};
+pub use workspace::{OpenPalette, Startup, step_cursor};
 
 /// The action and key context for a command name from `pgroove_core::keys`.
 fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static str>)> {
@@ -73,6 +73,14 @@ pub fn init(cx: &mut App) {
         })
         .collect();
     cx.bind_keys(bindings);
+    // Arrow keys move through the sidebar tree while it has focus.
+    cx.bind_keys([
+        KeyBinding::new("up", workspace::SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", workspace::SidebarDown, Some("Sidebar")),
+        KeyBinding::new("enter", workspace::SidebarActivate, Some("Sidebar")),
+        KeyBinding::new("right", workspace::SidebarExpand, Some("Sidebar")),
+        KeyBinding::new("left", workspace::SidebarCollapse, Some("Sidebar")),
+    ]);
 }
 
 #[cfg(test)]
