@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
@@ -464,6 +465,47 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Connects with the form's values and reports the outcome in a notification.
+    fn test_connection(
+        &mut self,
+        values: crate::connections::FormValues,
+        original: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(msg) = values.profile.validate() {
+            window.push_notification(Notification::error(msg), cx);
+            return;
+        }
+        let secrets = self.secrets.clone();
+        let handle = window.window_handle();
+        window.push_notification("Testing connection…", cx);
+        let task = self.runtime.spawn(async move {
+            let saved = match (values.password.is_empty(), original) {
+                (true, Some(name)) => secrets.get(&name)?,
+                _ => None,
+            };
+            let pw = (!values.password.is_empty())
+                .then_some(values.password)
+                .or(saved);
+            let (client, version) = connect(&values.profile, pw.as_deref()).await?;
+            drop(client);
+            anyhow::Ok(version)
+        });
+        cx.spawn(async move |_, cx| {
+            let msg = match flatten(task.await) {
+                Ok(v) => Notification::success(format!("Connected to PostgreSQL {v}")),
+                Err(e) => Notification::error(format!("Couldn't connect: {e}")),
+            };
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, cx| window.push_notification(msg, cx))
+                    .ok();
+            });
+        })
+        .detach();
+    }
+
     fn open_form(
         &mut self,
         original: Option<ConnectionProfile>,
@@ -479,14 +521,26 @@ impl Workspace {
         } else {
             "New connection"
         };
-        window.open_dialog(cx, move |dialog, _, _| {
+        let test = {
+            let this = this.clone();
+            let original = original_name.clone();
+            Rc::new(
+                move |values: crate::connections::FormValues, window: &mut Window, cx: &mut App| {
+                    let original = original.clone();
+                    this.update(cx, |ws, cx| {
+                        ws.test_connection(values, original, window, cx)
+                    });
+                },
+            )
+        };
+        window.open_dialog(cx, move |dialog, _, cx| {
             let form_ok = form.clone();
             let this = this.clone();
             let original_name = original_name.clone();
             dialog
                 .title(title)
                 .w(px(420.))
-                .child(form.render())
+                .child(form.render(cx, test.clone()))
                 .on_ok(move |_, window, cx| {
                     let values = form_ok.values(cx);
                     let result = values

@@ -1,9 +1,16 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio_postgres::{Client, Config, NoTls};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, ring};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use tokio_postgres::config::SslMode as DriverSsl;
+use tokio_postgres::{Client, Config};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
-use crate::ConnectionProfile;
+use crate::{ConnectionProfile, SslMode};
 
 /// Builds the driver config. The password is passed separately and never logged.
 pub fn build_config(profile: &ConnectionProfile, password: Option<&str>) -> Config {
@@ -13,11 +20,78 @@ pub fn build_config(profile: &ConnectionProfile, password: Option<&str>) -> Conf
         .dbname(&profile.database)
         .user(&profile.user)
         .application_name("pgroove")
-        .connect_timeout(Duration::from_secs(10));
+        .connect_timeout(Duration::from_secs(10))
+        .ssl_mode(match profile.ssl {
+            SslMode::Disable => DriverSsl::Disable,
+            SslMode::Prefer => DriverSsl::Prefer,
+            SslMode::Require | SslMode::VerifyFull => DriverSsl::Require,
+        });
     if let Some(pw) = password {
         cfg.password(pw);
     }
     cfg
+}
+
+/// Accepts any server certificate (libpq `require` / `prefer` semantics).
+#[derive(Debug)]
+struct NoVerify(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Builds the TLS connector for a mode.
+pub fn tls_connector(mode: SslMode) -> Result<MakeRustlsConnect> {
+    let provider = Arc::new(ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?;
+    let config = if mode == SslMode::VerifyFull {
+        let mut roots = RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for e in &native.errors {
+            log::warn!("loading system certificates: {e}");
+        }
+        let (added, ignored) = roots.add_parsable_certificates(native.certs);
+        log::debug!("loaded {added} system certificates, ignored {ignored}");
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+            .with_no_client_auth()
+    };
+    Ok(MakeRustlsConnect::new(config))
 }
 
 /// Connects and spawns the connection driver task on the current tokio runtime.
@@ -27,7 +101,7 @@ pub async fn connect(
     password: Option<&str>,
 ) -> Result<(Client, String)> {
     let (client, conn) = build_config(profile, password)
-        .connect(NoTls)
+        .connect(tls_connector(profile.ssl)?)
         .await
         .with_context(|| format!("connecting to {}", profile.label()))?;
     let name = profile.name.clone();
@@ -51,6 +125,7 @@ pub(crate) async fn test_connection() -> Option<(Client, String)> {
         port: f[1].parse().unwrap(),
         user: f[2].into(),
         database: f[4].into(),
+        ssl: SslMode::Prefer,
     };
     let pw = (!f[3].is_empty()).then_some(f[3]);
     Some(connect(&p, pw).await.unwrap())
@@ -69,8 +144,25 @@ mod tests {
             port: 6543,
             database: "shop".into(),
             user: "me".into(),
+            ssl: SslMode::VerifyFull,
         };
         let cfg = build_config(&p, Some("pw"));
+        assert_eq!(cfg.get_ssl_mode(), DriverSsl::Require);
+        assert_eq!(
+            build_config(&ConnectionProfile::default(), None).get_ssl_mode(),
+            DriverSsl::Prefer
+        );
+        assert_eq!(
+            build_config(
+                &ConnectionProfile {
+                    ssl: SslMode::Disable,
+                    ..Default::default()
+                },
+                None
+            )
+            .get_ssl_mode(),
+            DriverSsl::Disable
+        );
         assert_eq!(cfg.get_hosts(), [Host::Tcp("db.example".into())]);
         assert_eq!(cfg.get_ports(), [6543]);
         assert_eq!(cfg.get_dbname(), Some("shop"));
@@ -128,5 +220,44 @@ mod tests {
             .batch_execute("drop schema pgroove_t cascade")
             .await
             .unwrap();
+    }
+
+    /// Needs a TLS-enabled server: `PGROOVE_TEST_PG_TLS=host:port:user:password:db`.
+    #[tokio::test]
+    async fn connect_tls_live() {
+        let Ok(spec) = std::env::var("PGROOVE_TEST_PG_TLS") else {
+            return;
+        };
+        let f: Vec<&str> = spec.splitn(5, ':').collect();
+        let mut p = ConnectionProfile {
+            name: "tls".into(),
+            host: f[0].into(),
+            port: f[1].parse().unwrap(),
+            user: f[2].into(),
+            database: f[4].into(),
+            ssl: SslMode::Require,
+        };
+        let pw = (!f[3].is_empty()).then_some(f[3]);
+        let ssl_in_use = |client: Client| async move {
+            let row = client
+                .query_one(
+                    "select ssl from pg_stat_ssl where pid = pg_backend_pid()",
+                    &[],
+                )
+                .await
+                .unwrap();
+            row.get::<_, bool>(0)
+        };
+        let (c, _) = connect(&p, pw).await.unwrap();
+        assert!(ssl_in_use(c).await, "require uses TLS");
+        p.ssl = SslMode::Prefer;
+        let (c, _) = connect(&p, pw).await.unwrap();
+        assert!(ssl_in_use(c).await, "prefer uses TLS when offered");
+        p.ssl = SslMode::Disable;
+        let (c, _) = connect(&p, pw).await.unwrap();
+        assert!(!ssl_in_use(c).await, "disable stays plain");
+        // A self-signed certificate must fail verification.
+        p.ssl = SslMode::VerifyFull;
+        assert!(connect(&p, pw).await.is_err());
     }
 }

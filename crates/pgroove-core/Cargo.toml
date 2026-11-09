@@ -14,6 +14,11 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
 tokio-postgres = "0.7"
 toml = "0.9"
+tokio-postgres-rustls = "0.14.0"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+percent-encoding = "2"
+rustls-native-certs = "0.8.5"
+url = "2.5.8"
 
 [dev-dependencies]
 tempfile = "3"

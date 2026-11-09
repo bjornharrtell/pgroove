@@ -15,5 +15,5 @@ pub mod secrets;
 pub mod store;
 pub mod structure;
 
-pub use profile::ConnectionProfile;
+pub use profile::{ConnectionProfile, SslMode};
 pub use store::ProfileStore;
