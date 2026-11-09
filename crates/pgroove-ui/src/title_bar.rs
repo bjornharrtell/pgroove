@@ -9,6 +9,12 @@ use gpui_kit::*;
 
 pub const HEIGHT: f32 = 36.;
 
+/// Left padding of the bar: on macOS the native window buttons ("traffic lights") sit there.
+#[cfg(target_os = "macos")]
+const LEFT_PADDING: f32 = 80.;
+#[cfg(not(target_os = "macos"))]
+const LEFT_PADDING: f32 = 12.;
+
 struct DragState {
     should_move: bool,
 }
@@ -51,7 +57,7 @@ pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -
         .flex_shrink_0()
         .h(px(HEIGHT))
         .items_center()
-        .pl_3()
+        .pl(px(LEFT_PADDING))
         .rounded_tl(radii.top_left)
         .rounded_tr(radii.top_right)
         .bg(theme.title_bar)
