@@ -52,6 +52,22 @@ Key decisions:
 9. **M8 – Server monitoring (done: sessions with cancel/terminate, blocking, statements, databases, tables, replication, settings; auto-refresh):** `pg_stat_activity` (cancel/terminate), locks/blocking tree, `pg_stat_statements` top queries, replication, DB/table sizes, settings browser.
 10. **M9 – Polish (done: command palette, keybinding config, session restore, packaging workflow, README):** command palette, keybindings config, session restore, packaging (Linux/macOS/Windows), docs.
 
+## Planned: import from DBeaver
+
+Not implemented. Feasible as one core module plus one UI action.
+
+- **Source:** a DBeaver project's `.dbeaver/` folder (`~/.local/share/DBeaverData/workspace6/<project>/` on Linux, `~/Library/DBeaverData/…` on macOS, `%APPDATA%\DBeaverData\…` on Windows).
+  - `data-sources.json`: plain JSON with a `connections` map (provider, driver, name, `configuration` host/port/database/url/`configurationType`/`auth-model`, connection `type`) and `folders`.
+  - `credentials-config.json`: AES-128-CBC, IV in the first 16 bytes, a fixed publicly documented key; decrypts to `{ "<id>": { "#connection": { "user", "password" } } }`. Not verified against a real file yet.
+- **Mapping:**
+  - Keep entries whose provider is `postgresql`; skip the rest with a note.
+  - When `configurationType` is `URL`, parse the JDBC `url` (host, port, database, `sslmode`), because it can disagree with the `host`/`port` fields (seen in a real file). Reuse the URI import.
+  - Map name, user and SSL mode; map a folder to a name prefix.
+  - Save passwords through the keychain code.
+- **UI:** "Import from DBeaver…" in the palette and connections dialog: detect the default workspace or pick a project folder, list the connections with checkboxes, a "include saved passwords" toggle (off by default, with a note that DBeaver only obfuscates them), skip or overwrite on name clashes.
+- **Not mapped:** SSH tunnels, custom SSL certificates and keys, non-PostgreSQL connections, per-connection settings (`resultset.maxrows`, bootstrap queries), enterprise auth models. Report each skipped item.
+- **Code:** `pgroove-core::import_dbeaver` (parse, decrypt with `aes` + `cbc`, map to `ConnectionProfile`); `pgroove-ui` dialog; tests from a sanitized fixture, including the URL-vs-host case and a corrupt credentials file.
+
 ## Later / ideas
 
 - Schema diff, DDL generation/migrations, ER diagram, import wizard, SSH tunnels, role/privilege viewer, wasm build via proxy.
