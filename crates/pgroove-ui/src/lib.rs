@@ -12,6 +12,7 @@ mod schema_tree;
 mod sql_completion;
 mod structure_view;
 mod table_view;
+mod title_bar;
 mod workspace;
 
 pub use workspace::Workspace;

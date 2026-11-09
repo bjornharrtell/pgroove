@@ -9,8 +9,8 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::window_corner_radii;
 use gpui_kit::component::*;
-use gpui_kit::component::{TitleBar, window_corner_radii};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
@@ -1096,7 +1096,7 @@ impl Workspace {
             )
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let read_only = cx.global::<ReadOnlyMode>().0;
         let mode_chip = Button::new("read-only")
             .xsmall()
@@ -1120,7 +1120,7 @@ impl Workspace {
             Status::Failed(_) => ("Connection failed".into(), theme.danger),
             Status::Idle => ("No connection".into(), theme.muted_foreground),
         };
-        TitleBar::new().child(
+        crate::title_bar::title_bar(
             h_flex()
                 .w_full()
                 .gap_3()
@@ -1165,6 +1165,8 @@ impl Workspace {
                         .label("Command palette · Ctrl+K")
                         .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
                 ),
+            window,
+            cx,
         )
     }
 
@@ -1295,7 +1297,7 @@ impl Render for Workspace {
             )
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
