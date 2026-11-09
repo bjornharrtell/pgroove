@@ -75,8 +75,8 @@ mod tests {
     }
 
     /// Needs a running keychain; enable with `PGROOVE_TEST_KEYRING=1`.
-    #[test]
-    fn keyring_persists_across_entries() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keyring_persists_across_entries() {
         if std::env::var("PGROOVE_TEST_KEYRING").is_err() {
             return;
         }
