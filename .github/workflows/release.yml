@@ -62,12 +62,37 @@ jobs:
             $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
             "$h  $($f.Name)" | Out-File -Encoding ascii "$($f.FullName).sha256"
           }
-      - uses: softprops/action-gh-release@v3
+      - uses: actions/upload-artifact@v7
         with:
-          files: |
+          name: dist-${{ matrix.name }}
+          path: |
             pgroove-*.tar.gz
             pgroove-*.tar.gz.sha256
             pgroove-*.zip
             pgroove-*.zip.sha256
             pgroove-*.AppImage
             pgroove-*.AppImage.sha256
+          if-no-files-found: error
+
+  # One job publishes the release so the notes are written once for all platforms.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Release notes from commit messages
+        run: bash packaging/release-notes.sh "${{ github.ref_name }}" > notes.md
+      - uses: softprops/action-gh-release@v3
+        with:
+          body_path: notes.md
+          files: dist/*
+          # A tag like v1.0.0-rc.1 is published as a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}

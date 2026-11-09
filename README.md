@@ -86,6 +86,13 @@ format_sql = []                       # unbind
 Commands: `run_query` (default `ctrl-enter`), `cancel_query` (`escape`),
 `format_sql` (`ctrl-shift-f`), `open_palette` (`ctrl-k`).
 
+## Releasing
+
+Push a tag like `v0.2.0` (after bumping `version` in the root `Cargo.toml`). The release workflow
+builds every platform, publishes the archives with their checksums, and writes the release notes
+from the Conventional Commit messages since the previous tag (`packaging/release-notes.sh`), so
+keep commit subjects in the `type(scope): description` form.
+
 ## Development
 
 ```bash
