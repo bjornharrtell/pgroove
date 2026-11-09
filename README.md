@@ -44,11 +44,26 @@ libraries (Vulkan, Wayland or X11); make it executable and run it:
 chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
 ```
 
+## Updates
+
+pgroove checks GitHub releases a few seconds after it starts and shows an **Update to x.y.z**
+button in the title bar when a newer version exists. Clicking it shows the release notes;
+**Install update** downloads the right file for your platform (the AppImage if you run one),
+verifies its SHA-256 against the checksum published with the release, replaces the program,
+and then offers **Restart to update**. Nothing is installed without your click, and a release
+without a checksum file is refused.
+
+Turn the startup check off from the command palette ("Turn off automatic update checks"),
+by setting `check_for_updates = false` in `settings.toml`, or with the environment variable
+`PGROOVE_NO_UPDATE_CHECK=1`. "Check for updates" in the palette checks on demand.
+`PGROOVE_UPDATE_URL` points the check at another release feed.
+
 ## Files
 
 | File | Location | Purpose |
 |---|---|---|
 | `connections.toml` | config dir `pgroove/` | saved connection profiles (no passwords) |
+| `settings.toml` | config dir `pgroove/` | preferences (update checks) |
 | `snippets.toml` | config dir `pgroove/` | saved snippets |
 | `keybindings.toml` | config dir `pgroove/` | keybinding overrides |
 | `history.toml` | local data dir `pgroove/` | query history (last 500) |

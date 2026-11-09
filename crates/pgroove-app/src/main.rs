@@ -5,6 +5,7 @@ use gpui_kit::*;
 use pgroove_core::ProfileStore;
 use pgroove_core::secrets::KeyringStore;
 use pgroove_core::session::SessionState;
+use pgroove_core::settings::Settings;
 use pgroove_ui::Workspace;
 
 /// Corner radius of the application window.
@@ -43,6 +44,11 @@ fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(tokio::runtime::Runtime::new()?);
     let path = ProfileStore::default_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
     let store = ProfileStore::load(path)?;
+    let settings_path = Settings::default_path();
+    let settings = settings_path
+        .as_deref()
+        .map(Settings::load)
+        .unwrap_or_default();
     let session_path = SessionState::default_path();
     let session = session_path
         .as_deref()
@@ -77,6 +83,8 @@ fn main() -> anyhow::Result<()> {
                         runtime,
                         session,
                         session_path,
+                        settings,
+                        settings_path,
                         window,
                         cx,
                     )

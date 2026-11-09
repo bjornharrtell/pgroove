@@ -20,6 +20,8 @@ use pgroove_core::data::TableRef;
 use pgroove_core::history::{History, Snippets};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::session::SessionState;
+use pgroove_core::settings::Settings;
+use pgroove_core::update::{self, Release};
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
@@ -71,6 +73,16 @@ impl DbSession {
 }
 
 actions!(workspace, [OpenPalette]);
+
+/// Where the self-update process stands.
+#[derive(Clone, Debug)]
+enum UpdateState {
+    Idle,
+    Checking,
+    Available(Release),
+    Installing(semver::Version),
+    Ready(semver::Version),
+}
 
 /// Left padding of the first tree level and the extra indent per level.
 const TREE_BASE: f32 = 10.;
@@ -124,6 +136,10 @@ pub struct Workspace {
     session_path: Option<std::path::PathBuf>,
     window_size: Option<(f32, f32)>,
     pending_tables: Vec<PendingTable>,
+    update: UpdateState,
+    settings: Settings,
+    settings_path: Option<std::path::PathBuf>,
+    http: reqwest::Client,
 }
 
 impl Workspace {
@@ -133,6 +149,8 @@ impl Workspace {
         runtime: Arc<Runtime>,
         session: SessionState,
         session_path: Option<std::path::PathBuf>,
+        settings: Settings,
+        settings_path: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -203,12 +221,31 @@ impl Workspace {
             sessions: Vec::new(),
             next_session: 1,
             last_session: None,
+            update: UpdateState::Idle,
+            settings,
+            settings_path,
+            http: reqwest::Client::builder()
+                .user_agent(concat!("pgroove/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         };
         cx.on_app_quit(|this, cx| {
             this.save_session(cx);
             async {}
         })
         .detach();
+        if this.settings.check_for_updates && std::env::var_os("PGROOVE_NO_UPDATE_CHECK").is_none()
+        {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                this.update_in(cx, |this, window, cx| this.check_updates(false, window, cx))
+                    .ok();
+            })
+            .detach();
+        }
         for (name, database) in &session.connections {
             if let Some(p) = this
                 .store
@@ -769,6 +806,9 @@ impl Workspace {
                     self.close_session(sid, cx);
                 }
             }
+            CheckUpdates => self.check_updates(true, window, cx),
+            InstallUpdate => self.open_update_dialog(window, cx),
+            ToggleUpdateChecks => self.toggle_update_checks(cx),
         }
     }
 
@@ -781,8 +821,12 @@ impl Workspace {
             .collect();
         let groups = std::rc::Rc::new(palette::groups(
             &names,
-            self.ready_sessions().next().is_some(),
-            cx.global::<ReadOnlyMode>().0,
+            &palette::PaletteContext {
+                connected: self.ready_sessions().next().is_some(),
+                read_only: cx.global::<ReadOnlyMode>().0,
+                update_available: matches!(self.update, UpdateState::Available(_)),
+                auto_check_updates: self.settings.check_for_updates,
+            },
         ));
         let state = cx.new(|cx| CommandState::new(window, cx));
         let this = cx.entity();
@@ -824,6 +868,195 @@ impl Workspace {
                     }))
                 })
         });
+    }
+
+    /// Looks for a newer release; `manual` checks report their outcome in a notification.
+    fn check_updates(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.update,
+            UpdateState::Checking | UpdateState::Installing(_) | UpdateState::Ready(_)
+        ) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        cx.notify();
+        let http = self.http.clone();
+        // PGROOVE_UPDATE_URL points the check at another release feed (for testing or mirrors).
+        let url = std::env::var("PGROOVE_UPDATE_URL")
+            .unwrap_or_else(|_| update::LATEST_RELEASE_URL.to_string());
+        let task = self
+            .runtime
+            .spawn(async move { update::fetch_latest(&http, &url).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = flatten(task.await);
+            this.update_in(cx, move |this, window, cx| {
+                this.update = UpdateState::Idle;
+                match result {
+                    Ok(rel) if rel.is_newer_than(&update::current_version()) => {
+                        if manual {
+                            window.push_notification(
+                                format!("Version {} is available", rel.version),
+                                cx,
+                            );
+                        }
+                        this.update = UpdateState::Available(rel);
+                    }
+                    Ok(_) if manual => window.push_notification(
+                        format!("You're up to date (version {})", update::current_version()),
+                        cx,
+                    ),
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("update check failed: {e}");
+                        if manual {
+                            window.push_notification(
+                                Notification::error(format!("Couldn't check for updates: {e}")),
+                                cx,
+                            );
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Downloads, verifies and installs the available update.
+    fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let UpdateState::Available(release) = self.update.clone() else {
+            return;
+        };
+        let Some((asset, package)) =
+            update::pick_asset(&release, &update::current_target()).map(|(a, p)| (a.clone(), p))
+        else {
+            window.push_notification(
+                Notification::error("There is no download for this platform."),
+                cx,
+            );
+            return;
+        };
+        self.update = UpdateState::Installing(release.version.clone());
+        cx.notify();
+        let http = self.http.clone();
+        let rel = release.clone();
+        let task = self.runtime.spawn(async move {
+            let bytes = update::download_verified(&http, &rel, &asset).await?;
+            let binary = if cfg!(windows) {
+                "pgroove.exe"
+            } else {
+                "pgroove"
+            };
+            let program = update::extract_binary(&bytes, package, binary)?;
+            update::install(&program, package)?;
+            anyhow::Ok(())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = flatten(task.await);
+            this.update_in(cx, move |this, window, cx| {
+                match result {
+                    Ok(()) => this.update = UpdateState::Ready(release.version.clone()),
+                    Err(e) => {
+                        log::warn!("update failed: {e}");
+                        window.push_notification(
+                            Notification::error(format!("Update failed: {e}")),
+                            cx,
+                        );
+                        this.update = UpdateState::Available(release);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts the updated program and quits this one.
+    fn restart_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_session(cx);
+        match update::restart() {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                window.push_notification(Notification::error(format!("Couldn't restart: {e}")), cx)
+            }
+        }
+    }
+
+    fn toggle_update_checks(&mut self, cx: &mut Context<Self>) {
+        self.settings.check_for_updates = !self.settings.check_for_updates;
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            log::warn!("could not save settings: {e:#}");
+        }
+        cx.notify();
+    }
+
+    fn open_update_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let UpdateState::Available(release) = self.update.clone() else {
+            return;
+        };
+        let this = cx.entity();
+        let notes: String = release.notes.chars().take(1500).collect();
+        let title = format!("Version {} is available", release.version);
+        let current = format!("You have version {}.", update::current_version());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let this = this.clone();
+            dialog
+                .title(title.clone())
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .id("update-notes")
+                        .max_h(px(300.))
+                        .overflow_y_scroll()
+                        .gap_2()
+                        .child(div().text_sm().child(current.clone()))
+                        .child(div().text_xs().child(notes.clone())),
+                )
+                .actions("Install update", true, move |_, window, cx| {
+                    this.update(cx, |ws, cx| ws.install_update(window, cx));
+                    true
+                })
+        });
+    }
+
+    /// The title bar control for the update state, if there is something to show.
+    fn update_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        match &self.update {
+            UpdateState::Available(r) => Some(
+                Button::new("update-available")
+                    .xsmall()
+                    .outline()
+                    .icon(IconName::Download)
+                    .label(format!("Update to {}", r.version))
+                    .tooltip("A new version is available")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_update_dialog(window, cx)),
+                    )
+                    .into_any_element(),
+            ),
+            UpdateState::Installing(v) => Some(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("Updating to {v}…"))
+                    .into_any_element(),
+            ),
+            UpdateState::Ready(v) => Some(
+                Button::new("update-restart")
+                    .xsmall()
+                    .outline()
+                    .icon(IconName::RefreshCw)
+                    .label("Restart to update")
+                    .tooltip(format!("Version {v} is installed"))
+                    .on_click(cx.listener(|this, _, window, cx| this.restart_app(window, cx)))
+                    .into_any_element(),
+            ),
+            UpdateState::Idle | UpdateState::Checking => None,
+        }
     }
 
     fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
@@ -1555,6 +1788,7 @@ impl Workspace {
                             }
                         })),
                 )
+                .children(self.update_chip(cx))
                 .child(div().flex_1())
                 .child(
                     Button::new("palette")

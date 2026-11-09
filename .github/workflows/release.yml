@@ -46,8 +46,28 @@ jobs:
       - name: AppImage
         if: runner.os == 'Linux'
         run: sh packaging/build-appimage.sh pgroove-${{ github.ref_name }}-x86_64.AppImage
+      # The in-app updater refuses to install an asset without a matching .sha256 file.
+      - name: Checksums (unix)
+        if: runner.os != 'Windows'
+        run: |
+          for f in pgroove-*.tar.gz pgroove-*.AppImage; do
+            [ -f "$f" ] && shasum -a 256 "$f" > "$f.sha256"
+          done
+          ls pgroove-*
+      - name: Checksums (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem pgroove-*.zip) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($f.Name)" | Out-File -Encoding ascii "$($f.FullName).sha256"
+          }
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            pgroove-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.ext }}
-            pgroove-${{ github.ref_name }}-x86_64.AppImage
+            pgroove-*.tar.gz
+            pgroove-*.tar.gz.sha256
+            pgroove-*.zip
+            pgroove-*.zip.sha256
+            pgroove-*.AppImage
+            pgroove-*.AppImage.sha256

@@ -16,6 +16,9 @@ pub enum PaletteCommand {
     NewConnection,
     Connect(String),
     Disconnect,
+    CheckUpdates,
+    InstallUpdate,
+    ToggleUpdateChecks,
 }
 
 pub struct PaletteEntry {
@@ -42,8 +45,18 @@ fn entry(
 }
 
 /// Builds the palette contents for the current state.
-pub fn groups(connections: &[String], connected: bool, read_only: bool) -> Vec<PaletteGroup> {
+/// What the palette needs to know to decide which commands to offer.
+pub struct PaletteContext {
+    pub connected: bool,
+    pub read_only: bool,
+    /// A newer version has been found and can be installed.
+    pub update_available: bool,
+    pub auto_check_updates: bool,
+}
+
+pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup> {
     use PaletteCommand::*;
+    let (connected, read_only) = (ctx.connected, ctx.read_only);
     let mut query = vec![entry(NewQuery, "New query tab", &["tab", "editor"])];
     if connected {
         query.extend([
@@ -97,6 +110,31 @@ pub fn groups(connections: &[String], connected: bool, read_only: bool) -> Vec<P
         label: "Connections",
         entries: conns,
     });
+    let mut app = vec![entry(
+        CheckUpdates,
+        "Check for updates",
+        &["upgrade", "version"],
+    )];
+    if ctx.update_available {
+        app.push(entry(
+            InstallUpdate,
+            "Install the available update",
+            &["upgrade"],
+        ));
+    }
+    app.push(entry(
+        ToggleUpdateChecks,
+        if ctx.auto_check_updates {
+            "Turn off automatic update checks"
+        } else {
+            "Turn on automatic update checks"
+        },
+        &["upgrade", "settings"],
+    ));
+    groups.push(PaletteGroup {
+        label: "Application",
+        entries: app,
+    });
     groups
 }
 
@@ -109,14 +147,27 @@ pub fn command_at(groups: &[PaletteGroup], section: usize, row: usize) -> Option
 mod tests {
     use super::*;
 
+    fn ctx(connected: bool, read_only: bool, update: bool, auto: bool) -> PaletteContext {
+        PaletteContext {
+            connected,
+            read_only,
+            update_available: update,
+            auto_check_updates: auto,
+        }
+    }
+
     fn titles(g: &[PaletteGroup], i: usize) -> Vec<&str> {
         g[i].entries.iter().map(|e| e.title.as_str()).collect()
     }
 
     #[test]
     fn offline_palette_hides_server_commands() {
-        let g = groups(&["a".to_string()], false, true);
-        assert_eq!(g.len(), 3);
+        let g = groups(&["a".to_string()], &ctx(false, true, false, true));
+        assert_eq!(g.len(), 4);
+        assert_eq!(
+            titles(&g, 3),
+            ["Check for updates", "Turn off automatic update checks"]
+        );
         assert!(!titles(&g, 0).contains(&"Run query"));
         assert_eq!(titles(&g, 1), ["Allow editing (turn off read-only)"]);
         assert_eq!(titles(&g, 2), ["New connection…", "Connect to a"]);
@@ -124,18 +175,26 @@ mod tests {
 
     #[test]
     fn connected_palette_lists_everything() {
-        let g = groups(&[], true, false);
+        let g = groups(&[], &ctx(true, false, true, false));
         assert!(titles(&g, 0).contains(&"Run query"));
         assert!(titles(&g, 0).contains(&"Analyze query"));
         assert!(titles(&g, 1).contains(&"Open activity monitor"));
         assert!(titles(&g, 1).contains(&"Disconnect"));
         assert_eq!(titles(&g, 1)[0], "Block writes (turn on read-only)");
         assert_eq!(titles(&g, 2), ["New connection…"]);
+        assert_eq!(
+            titles(&g, 3),
+            [
+                "Check for updates",
+                "Install the available update",
+                "Turn on automatic update checks"
+            ]
+        );
     }
 
     #[test]
     fn lookup_by_position() {
-        let g = groups(&["x".to_string()], true, true);
+        let g = groups(&["x".to_string()], &ctx(true, true, false, true));
         assert_eq!(command_at(&g, 0, 0), Some(PaletteCommand::NewQuery));
         assert_eq!(
             command_at(&g, 2, 1),
