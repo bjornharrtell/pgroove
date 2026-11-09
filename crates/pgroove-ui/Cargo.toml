@@ -11,3 +11,4 @@ log.workspace = true
 pgroove-core = { path = "../pgroove-core" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-postgres = "0.7"
+lsp-types = { version = "0.97.0", features = ["proposed"] }

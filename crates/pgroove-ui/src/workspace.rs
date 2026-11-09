@@ -12,6 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
 use pgroove_core::data::TableRef;
+use pgroove_core::explain::Plan;
 use pgroove_core::query::{self, QueryOutput};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
@@ -21,6 +22,7 @@ use crate::connections::ConnectionForm;
 use crate::grid_pane::GridPane;
 use crate::mode::ReadOnlyMode;
 use crate::schema_tree::{Row, SchemaTree};
+use crate::sql_completion::{SharedIndex, SqlCompletions};
 use crate::structure_view::OpenTable;
 use crate::table_view::TableView;
 
@@ -44,7 +46,7 @@ impl Status {
     }
 }
 
-actions!(workspace, [RunQuery, CancelQuery]);
+actions!(workspace, [RunQuery, CancelQuery, FormatSql]);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum RunState {
@@ -57,6 +59,7 @@ enum RunState {
 enum BottomTab {
     Results,
     Messages,
+    Plan,
 }
 
 enum TabKind {
@@ -79,6 +82,8 @@ pub struct Workspace {
     bottom: BottomTab,
     tabs: Vec<TabKind>,
     active_tab: usize,
+    plan: Option<Plan>,
+    completions: SharedIndex,
 }
 
 impl Workspace {
@@ -97,6 +102,12 @@ impl Workspace {
                 .placeholder("select now();")
         });
         let results = cx.new(|cx| GridPane::new(false, window, cx));
+        let completions: SharedIndex = Default::default();
+        editor.update(cx, |e, _| {
+            e.lsp_mut().completion_provider = Some(std::rc::Rc::new(SqlCompletions {
+                index: completions.clone(),
+            }));
+        });
         Self {
             editor,
             results,
@@ -105,6 +116,8 @@ impl Workspace {
             bottom: BottomTab::Results,
             tabs: vec![TabKind::Query],
             active_tab: 0,
+            plan: None,
+            completions,
             store,
             secrets,
             runtime,
@@ -118,6 +131,9 @@ impl Workspace {
         self.client = None;
         self.close_table_tabs();
         self.tree.reset();
+        if let Ok(mut s) = self.completions.write() {
+            *s = None;
+        }
         self.status = Status::Connecting(profile.name.clone());
         cx.notify();
         let secrets = self.secrets.clone();
@@ -139,6 +155,7 @@ impl Workspace {
                         this.client = Some(Arc::new(client));
                         this.status = Status::Connected { name, version };
                         this.load_schemas(cx);
+                        this.load_completions(cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
@@ -301,6 +318,78 @@ impl Workspace {
         cx.notify();
     }
 
+    fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let formatted = pgroove_core::format::format_sql(&text);
+        self.editor
+            .update(cx, |e, cx| e.set_value(formatted, window, cx));
+    }
+
+    fn explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
+        if self.run == RunState::Running {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.run = RunState::Failed("Connect to a database first.".into());
+            self.bottom = BottomTab::Messages;
+            cx.notify();
+            return;
+        };
+        let editor = self.editor.read(cx);
+        let selected = editor.selected_text().to_string();
+        let sql = if selected.trim().is_empty() {
+            editor.value().to_string()
+        } else {
+            selected
+        };
+        self.run = RunState::Running;
+        cx.notify();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::explain::run(&client, &sql, analyze).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(plan) => {
+                        this.run = RunState::Idle;
+                        this.plan = Some(plan);
+                        this.bottom = BottomTab::Plan;
+                    }
+                    Err(e) => {
+                        this.run = RunState::Failed(e);
+                        this.bottom = BottomTab::Messages;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_completions(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let slot = self.completions.clone();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::completion::load(&client).await });
+        cx.spawn(async move |_, _| match flatten(task.await) {
+            Ok(index) => {
+                if let Ok(mut s) = slot.write() {
+                    *s = Some(index);
+                }
+            }
+            Err(e) => log::warn!("could not load completion index: {e}"),
+        })
+        .detach();
+    }
+
     fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
         let read_only = !cx.global::<ReadOnlyMode>().0;
         cx.set_global(ReadOnlyMode(read_only));
@@ -318,6 +407,9 @@ impl Workspace {
         self.client = None;
         self.close_table_tabs();
         self.tree.reset();
+        if let Ok(mut s) = self.completions.write() {
+            *s = None;
+        }
         self.status = Status::Idle;
         cx.notify();
     }
@@ -706,6 +798,7 @@ impl Workspace {
             .border_color(theme.border)
             .child(tab("tab-results", "Results", BottomTab::Results))
             .child(tab("tab-messages", "Messages", BottomTab::Messages))
+            .child(tab("tab-plan", "Plan", BottomTab::Plan))
             .child(div().flex_1())
             .child(div().text_color(theme.muted_foreground).child(summary))
             .child(self.results.read(cx).actions())
@@ -722,6 +815,9 @@ impl Workspace {
                 .child(text)
                 .into_any_element()
         };
+        if self.bottom == BottomTab::Plan {
+            return crate::plan_view::render(self.plan.as_ref(), &theme);
+        }
         if self.bottom == BottomTab::Messages {
             if let RunState::Failed(e) = &self.run {
                 return note(e.clone(), theme.danger);
@@ -821,7 +917,32 @@ impl Workspace {
                             .loading(self.run == RunState::Running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_query(cx))),
                     )
-                    .child(Button::new("explain").outline().xsmall().label("Explain"))
+                    .child(
+                        Button::new("explain")
+                            .outline()
+                            .xsmall()
+                            .label("Explain")
+                            .tooltip("Estimated plan; does not run the statement")
+                            .on_click(cx.listener(|this, _, _, cx| this.explain(false, cx))),
+                    )
+                    .child(
+                        Button::new("analyze")
+                            .outline()
+                            .xsmall()
+                            .label("Analyze")
+                            .tooltip("Runs the statement in a transaction that is rolled back")
+                            .on_click(cx.listener(|this, _, _, cx| this.explain(true, cx))),
+                    )
+                    .child(
+                        Button::new("format")
+                            .ghost()
+                            .xsmall()
+                            .label("Format")
+                            .tooltip("Format SQL (Ctrl+Shift+F)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.format_sql(window, cx)),
+                            ),
+                    )
                     .child(
                         Button::new("cancel")
                             .ghost()
@@ -873,6 +994,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &RunQuery, _, cx| this.run_query(cx)))
             .on_action(cx.listener(|this, _: &CancelQuery, _, cx| this.cancel_query(cx)))
+            .on_action(cx.listener(|this, _: &FormatSql, window, cx| this.format_sql(window, cx)))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(cx))

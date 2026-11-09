@@ -3,8 +3,10 @@
 mod connections;
 mod grid_pane;
 mod mode;
+mod plan_view;
 mod results;
 mod schema_tree;
+mod sql_completion;
 mod structure_view;
 mod table_view;
 mod workspace;
@@ -13,7 +15,7 @@ pub use workspace::Workspace;
 
 use gpui_kit::{App, KeyBinding};
 
-pub use workspace::{CancelQuery, RunQuery};
+pub use workspace::{CancelQuery, FormatSql, RunQuery};
 
 /// Registers key bindings; call once at startup.
 pub fn init(cx: &mut App) {
@@ -22,5 +24,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-enter", RunQuery, None),
         KeyBinding::new("cmd-enter", RunQuery, None),
         KeyBinding::new("escape", CancelQuery, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-f", FormatSql, None),
     ]);
 }
