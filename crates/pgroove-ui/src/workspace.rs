@@ -30,7 +30,7 @@ use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
-use crate::query_tab::{QueryTab, RowLimitChanged};
+use crate::query_tab::{EditorResized, QueryTab, RowLimitChanged};
 use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
@@ -143,6 +143,11 @@ pub struct Workspace {
     http: pgroove_core::update::HttpClient,
     /// Search box above the schema tree.
     tree_filter: Entity<InputState>,
+    /// Sidebar and main area split; its sizes are remembered.
+    main_split: Entity<ResizableState>,
+    sidebar_width: f32,
+    /// Height of the SQL editor pane (shared by new query tabs and remembered).
+    editor_height: f32,
 }
 
 /// State loaded from disk before the window opens.
@@ -168,6 +173,18 @@ impl Workspace {
             settings,
             settings_path,
         } = startup;
+        let (sidebar_width, editor_height) = (
+            session.sidebar_width_or_default(),
+            session.editor_height_or_default(),
+        );
+        let main_split = cx.new(|_| ResizableState::default());
+        cx.subscribe(&main_split, |this, state, _: &ResizablePanelEvent, cx| {
+            if let Some(w) = state.read(cx).sizes().first() {
+                this.sidebar_width = f32::from(*w);
+                this.save_session(cx);
+            }
+        })
+        .detach();
         let history = History::default_path()
             .and_then(|p| {
                 History::load(p)
@@ -210,6 +227,12 @@ impl Workspace {
                     this.set_row_limit(ev.0, cx)
                 })
                 .detach();
+                cx.subscribe(&tab, |this, _, ev: &EditorResized, cx| {
+                    this.editor_height = ev.0;
+                    this.save_session(cx);
+                })
+                .detach();
+                tab.update(cx, |t, _| t.set_editor_height(editor_height));
                 if !text.is_empty() {
                     tab.update(cx, |t, cx| t.set_text(text, window, cx));
                 }
@@ -250,6 +273,9 @@ impl Workspace {
             last_session: None,
             update: UpdateState::Idle,
             tree_filter,
+            main_split,
+            sidebar_width,
+            editor_height,
             settings,
             settings_path,
             http: update::http_client(),
@@ -356,6 +382,8 @@ impl Workspace {
                 })
                 .collect(),
             window: self.window_size,
+            sidebar_width: Some(self.sidebar_width),
+            editor_height: Some(self.editor_height),
         };
         if let Err(e) = state.save(path) {
             log::warn!("could not save session: {e:#}");
@@ -715,6 +743,13 @@ impl Workspace {
             this.set_row_limit(ev.0, cx)
         })
         .detach();
+        cx.subscribe(&tab, |this, _, ev: &EditorResized, cx| {
+            this.editor_height = ev.0;
+            this.save_session(cx);
+        })
+        .detach();
+        let height = self.editor_height;
+        tab.update(cx, |t, _| t.set_editor_height(height));
         self.bind_query(&tab, focused, cx);
         self.tabs.push(TabKind::Query(tab.clone(), self.next_query));
         self.next_query += 1;
@@ -1835,9 +1870,7 @@ impl Workspace {
             list.into_any_element()
         };
         v_flex()
-            .w(px(260.))
-            .flex_shrink_0()
-            .h_full()
+            .size_full()
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.sidebar_border)
@@ -2188,11 +2221,25 @@ impl Render for Workspace {
             .text_color(theme.foreground)
             .child(self.render_toolbar(window, cx))
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_sidebar(cx))
-                    .child(self.render_main(cx)),
+                div().flex_1().min_h_0().child(
+                    h_resizable("main-split")
+                        .with_state(&self.main_split)
+                        .child(
+                            resizable_panel()
+                                .size(px(self.sidebar_width))
+                                .size_range(
+                                    px(pgroove_core::session::SIDEBAR_WIDTH.1)
+                                        ..px(pgroove_core::session::SIDEBAR_WIDTH.2),
+                                )
+                                .child(self.render_sidebar(cx)),
+                        )
+                        // Keep the toolbar and tabs readable however wide the sidebar gets.
+                        .child(
+                            resizable_panel()
+                                .size_range(px(480.)..px(20_000.))
+                                .child(self.render_main(cx)),
+                        ),
+                ),
             )
             .child(
                 StatusBar::new()

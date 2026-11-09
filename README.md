@@ -77,6 +77,11 @@ by setting `check_for_updates = false` in `settings.toml`, or with the environme
 `PGROOVE_NO_UPDATE_CHECK=1`. "Check for updates" in the palette checks on demand.
 `PGROOVE_UPDATE_URL` points the check at another release feed.
 
+## Layout
+
+Drag the dividers to resize the sidebar, the editor and results panes, and the cell inspector below
+a grid. The sidebar width and editor height are remembered in `session.toml`.
+
 ## Files
 
 | File | Location | Purpose |

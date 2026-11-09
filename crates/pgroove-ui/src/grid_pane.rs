@@ -54,6 +54,8 @@ pub struct GridPane {
     grid: Entity<TableState<ResultsTable>>,
     selected: Option<(usize, usize)>,
     inspected: Option<Inspected>,
+    /// Grid above, cell inspector below; the divider can be dragged.
+    split: Entity<ResizableState>,
     editable: bool,
     edit_input: Entity<InputState>,
     _subs: Vec<Subscription>,
@@ -100,6 +102,7 @@ impl GridPane {
             grid,
             selected: None,
             inspected: None,
+            split: cx.new(|_| ResizableState::default()),
             editable: false,
             edit_input,
             _subs: subs,
@@ -244,8 +247,7 @@ impl GridPane {
         let text = inspected.text.clone();
         Some(
             v_flex()
-                .flex_shrink_0()
-                .max_h(px(160.))
+                .size_full()
                 .border_t_1()
                 .border_color(theme.border)
                 .child(
@@ -307,6 +309,8 @@ impl GridPane {
                     d.child(
                         div()
                             .id("inspector-value")
+                            .flex_1()
+                            .min_h_0()
                             .px_3()
                             .pb_2()
                             .overflow_y_scroll()
@@ -327,10 +331,18 @@ impl GridPane {
 
 impl Render for GridPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(div().flex_1().min_h_0().child(DataTable::new(&self.grid)))
-            .children(self.render_inspector(cx))
+        let inspector = self.render_inspector(cx);
+        let show_inspector = inspector.is_some();
+        v_resizable("grid-split")
+            .with_state(&self.split)
+            .child(resizable_panel().child(DataTable::new(&self.grid)))
+            .child(
+                resizable_panel()
+                    .size(px(160.))
+                    .size_range(px(70.)..px(900.))
+                    .visible(show_inspector)
+                    .children(inspector),
+            )
     }
 }
 

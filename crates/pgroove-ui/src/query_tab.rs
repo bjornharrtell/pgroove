@@ -94,7 +94,15 @@ pub struct QueryTab {
     index: SharedIndex,
     /// Rows a run returns at most; larger results go through Export.
     row_limit: u32,
+    /// Editor above, results below; the divider can be dragged.
+    split: Entity<ResizableState>,
+    editor_height: f32,
 }
+
+/// Emitted when the editor pane is resized, so the height can be remembered.
+pub struct EditorResized(pub f32);
+
+impl EventEmitter<EditorResized> for QueryTab {}
 
 /// Emitted when the user picks another row limit, so it can be remembered.
 pub struct RowLimitChanged(pub u32);
@@ -134,7 +142,16 @@ impl QueryTab {
             }));
         });
         let results = cx.new(|cx| GridPane::new(false, window, cx));
+        let split = cx.new(|_| ResizableState::default());
+        cx.subscribe(&split, |_, state, _: &ResizablePanelEvent, cx| {
+            if let Some(h) = state.read(cx).sizes().first() {
+                cx.emit(EditorResized(f32::from(*h)));
+            }
+        })
+        .detach();
         Self {
+            split,
+            editor_height: pgroove_core::session::EDITOR_HEIGHT.0,
             runtime,
             client: None,
             editor,
@@ -160,6 +177,11 @@ impl QueryTab {
     fn pick_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
         self.apply_limit(limit, cx);
         cx.emit(RowLimitChanged(self.row_limit));
+    }
+
+    /// Sets the editor pane height used when the tab is first drawn.
+    pub(crate) fn set_editor_height(&mut self, height: f32) {
+        self.editor_height = height;
     }
 
     pub(crate) fn session(&self) -> Option<usize> {
@@ -887,22 +909,37 @@ impl Render for QueryTab {
                     ),
             )
             .child(
-                div()
-                    .h(px(170.))
-                    .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        Editor::new(&self.editor)
-                            .bordered(false)
-                            .p_0()
-                            .h_full()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(theme.mono_font_size),
-                    ),
+                div().flex_1().min_h_0().child(
+                    v_resizable("query-split")
+                        .with_state(&self.split)
+                        .child(
+                            resizable_panel()
+                                .size(px(self.editor_height))
+                                .size_range(
+                                    px(pgroove_core::session::EDITOR_HEIGHT.1)
+                                        ..px(pgroove_core::session::EDITOR_HEIGHT.2),
+                                )
+                                .child(
+                                    div().size_full().child(
+                                        Editor::new(&self.editor)
+                                            .bordered(false)
+                                            .p_0()
+                                            .h_full()
+                                            .font_family(theme.mono_font_family.clone())
+                                            .text_size(theme.mono_font_size),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                v_flex()
+                                    .size_full()
+                                    .child(self.render_results_header(cx))
+                                    .child(self.render_results_body(cx)),
+                            ),
+                        ),
+                ),
             )
-            .child(self.render_results_header(cx))
-            .child(self.render_results_body(cx))
     }
 }
 

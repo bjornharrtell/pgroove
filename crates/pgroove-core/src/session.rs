@@ -28,7 +28,17 @@ pub struct SessionState {
     /// Window size in logical pixels.
     #[serde(default)]
     pub window: Option<(f32, f32)>,
+    /// Width of the sidebar, in logical pixels.
+    #[serde(default)]
+    pub sidebar_width: Option<f32>,
+    /// Height of the SQL editor pane, in logical pixels.
+    #[serde(default)]
+    pub editor_height: Option<f32>,
 }
+
+/// Default and allowed sizes of the resizable panes, in logical pixels.
+pub const SIDEBAR_WIDTH: (f32, f32, f32) = (260.0, 180.0, 560.0);
+pub const EDITOR_HEIGHT: (f32, f32, f32) = (170.0, 80.0, 1200.0);
 
 /// Smallest window the layout stays usable at, in logical pixels.
 pub const MIN_WINDOW: (f32, f32) = (720.0, 480.0);
@@ -59,12 +69,29 @@ impl SessionState {
             .with_context(|| format!("writing {}", path.display()))
     }
 
+    /// The sidebar width to use: the saved one if sensible, else the default.
+    pub fn sidebar_width_or_default(&self) -> f32 {
+        sane(self.sidebar_width, SIDEBAR_WIDTH)
+    }
+
+    /// The editor pane height to use: the saved one if sensible, else the default.
+    pub fn editor_height_or_default(&self) -> f32 {
+        sane(self.editor_height, EDITOR_HEIGHT)
+    }
+
     /// A window size worth restoring (at least the minimum, not absurd).
     pub fn usable_window(&self) -> Option<(f32, f32)> {
         self.window.filter(|(w, h)| {
             (MIN_WINDOW.0..=10_000.0).contains(w) && (MIN_WINDOW.1..=10_000.0).contains(h)
         })
     }
+}
+
+/// A saved size when it is finite and within `(default, min, max)`; otherwise the default.
+pub fn sane(saved: Option<f32>, (default, min, max): (f32, f32, f32)) -> f32 {
+    saved
+        .filter(|v| v.is_finite() && (min..=max).contains(v))
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -89,12 +116,33 @@ mod tests {
                 name: "orders".into(),
             }],
             window: Some((1200.0, 800.0)),
+            sidebar_width: Some(300.0),
+            editor_height: Some(220.0),
         };
         s.save(&path).unwrap();
         assert_eq!(SessionState::load(&path), s);
         std::fs::write(&path, "queries = 3").unwrap();
         assert_eq!(SessionState::load(&path), SessionState::default());
         let _ = SessionState::default_path();
+    }
+
+    #[test]
+    fn pane_sizes_fall_back_when_unreasonable() {
+        let mut s = SessionState::default();
+        assert_eq!(s.sidebar_width_or_default(), SIDEBAR_WIDTH.0);
+        assert_eq!(s.editor_height_or_default(), EDITOR_HEIGHT.0);
+        s.sidebar_width = Some(320.0);
+        s.editor_height = Some(400.0);
+        assert_eq!(
+            (s.sidebar_width_or_default(), s.editor_height_or_default()),
+            (320.0, 400.0)
+        );
+        for bad in [0.0, -5.0, 9999.0, f32::NAN, f32::INFINITY] {
+            s.sidebar_width = Some(bad);
+            s.editor_height = Some(bad);
+            assert_eq!(s.sidebar_width_or_default(), SIDEBAR_WIDTH.0, "{bad}");
+            assert_eq!(s.editor_height_or_default(), EDITOR_HEIGHT.0, "{bad}");
+        }
     }
 
     #[test]
