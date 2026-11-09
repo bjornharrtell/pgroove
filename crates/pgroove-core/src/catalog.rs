@@ -101,42 +101,66 @@ pub async fn schemas(client: &Client) -> Result<Vec<String>> {
     Ok(rows.iter().map(|r| r.get(0)).collect())
 }
 
+/// SQL listing objects as `(schema, name, kind)`; `schema_cond` restricts the schemas
+/// and may use `n.nspname` and the parameter `$1`.
+fn objects_sql(schema_cond: &str) -> String {
+    format!(
+        "select nsp, name, kind from ( \
+           select n.nspname::text as nsp, c.relname::text as name, c.relkind::text as kind, 0 as grp \
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+           where {schema_cond} and c.relkind in ('r','p','f','v','m','S') \
+             and not c.relispartition \
+           union all \
+           select n.nspname::text, t.typname::text, \
+                  case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1 \
+           from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+           where {schema_cond} \
+             and (t.typtype in ('e','d') or (t.typtype = 'c' and exists \
+                  (select 1 from pg_class c where c.oid = t.typrelid and c.relkind = 'c'))) \
+           union all \
+           select n.nspname::text, \
+                  p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')', \
+                  case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2 \
+           from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+           where {schema_cond} and p.prokind in ('f','p','a') \
+             and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e') \
+         ) o order by nsp, grp, name"
+    )
+}
+
+fn to_objects(rows: &[tokio_postgres::Row]) -> Vec<(String, SchemaObject)> {
+    rows.iter()
+        .filter_map(|r| {
+            let kind = ObjectKind::from_relkind(r.get::<_, &str>(2))?;
+            Some((
+                r.get::<_, String>(0),
+                SchemaObject {
+                    name: r.get(1),
+                    kind,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Objects in a schema: relations (partitions excluded), then types, then
 /// functions, each group sorted by name.
 pub async fn objects(client: &Client, schema: &str) -> Result<Vec<SchemaObject>> {
     let rows = client
+        .query(&objects_sql("n.nspname = $1"), &[&schema])
+        .await?;
+    Ok(to_objects(&rows).into_iter().map(|(_, o)| o).collect())
+}
+
+/// Every object of every user schema as `(schema, object)`, for searching.
+pub async fn all_objects(client: &Client) -> Result<Vec<(String, SchemaObject)>> {
+    let rows = client
         .query(
-            "select name, kind from ( \
-               select c.relname::text as name, c.relkind::text as kind, 0 as grp \
-               from pg_class c join pg_namespace n on n.oid = c.relnamespace \
-               where n.nspname = $1 and c.relkind in ('r','p','f','v','m','S') \
-                 and not c.relispartition \
-               union all \
-               select t.typname::text, case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1 \
-               from pg_type t join pg_namespace n on n.oid = t.typnamespace \
-               where n.nspname = $1 \
-                 and (t.typtype in ('e','d') or (t.typtype = 'c' and exists \
-                      (select 1 from pg_class c where c.oid = t.typrelid and c.relkind = 'c'))) \
-               union all \
-               select p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')', \
-                      case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2 \
-               from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
-               where n.nspname = $1 and p.prokind in ('f','p','a') \
-                 and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e') \
-             ) o order by grp, name",
-            &[&schema],
+            &objects_sql("n.nspname !~ '^pg_' and n.nspname <> 'information_schema'"),
+            &[],
         )
         .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            let kind = ObjectKind::from_relkind(r.get::<_, &str>(1))?;
-            Some(SchemaObject {
-                name: r.get(0),
-                kind,
-            })
-        })
-        .collect())
+    Ok(to_objects(&rows))
 }
 
 /// Installed extensions as `(name, version)`.
@@ -294,6 +318,16 @@ mod tests {
                 .is_err()
         );
         assert!(extensions(&client).await.is_ok());
+        let all = all_objects(&client).await.unwrap();
+        assert!(
+            all.iter().any(|(s, o)| s == "pgroove_k"
+                && o.name == "mood"
+                && o.kind == ObjectKind::EnumType)
+        );
+        assert!(
+            all.iter()
+                .all(|(s, _)| s != "information_schema" && !s.starts_with("pg_"))
+        );
         let dbs = databases(&client).await.unwrap();
         assert!(dbs.contains(&"postgres".to_string()));
         assert!(!dbs.iter().any(|d| d.starts_with("template")));

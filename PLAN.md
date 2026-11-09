@@ -74,7 +74,7 @@ All milestones M0–M9 are implemented.
 - Results are buffered in memory, capped at 10,000 rows per statement.
 - Completion doesn't resolve subqueries or CTE names.
 - Packaging is a release workflow that builds a Linux AppImage and tarball, a macOS arm64 tarball and a Windows zip; no installers or signing. The AppImage build was only tested with a stand-in for `appimagetool`.
-- Not verified by hand: the macOS and Windows builds, and the Wayland window frame.
+- Not verified by hand: the macOS and Windows apps (CI builds and tests them), and the Wayland window frame.
 
 ## Open questions
 

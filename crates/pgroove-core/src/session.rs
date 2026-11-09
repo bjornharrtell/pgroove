@@ -30,6 +30,9 @@ pub struct SessionState {
     pub window: Option<(f32, f32)>,
 }
 
+/// Smallest window the layout stays usable at, in logical pixels.
+pub const MIN_WINDOW: (f32, f32) = (720.0, 480.0);
+
 impl SessionState {
     pub fn default_path() -> Option<PathBuf> {
         dirs::state_dir()
@@ -56,10 +59,11 @@ impl SessionState {
             .with_context(|| format!("writing {}", path.display()))
     }
 
-    /// A window size worth restoring (not tiny, not absurd).
+    /// A window size worth restoring (at least the minimum, not absurd).
     pub fn usable_window(&self) -> Option<(f32, f32)> {
-        self.window
-            .filter(|(w, h)| (400.0..=10_000.0).contains(w) && (300.0..=10_000.0).contains(h))
+        self.window.filter(|(w, h)| {
+            (MIN_WINDOW.0..=10_000.0).contains(w) && (MIN_WINDOW.1..=10_000.0).contains(h)
+        })
     }
 }
 
@@ -99,6 +103,10 @@ mod tests {
         assert_eq!(s.usable_window(), None);
         s.window = Some((10.0, 10.0));
         assert_eq!(s.usable_window(), None);
+        s.window = Some((719.0, 800.0));
+        assert_eq!(s.usable_window(), None, "narrower than the minimum");
+        s.window = Some((MIN_WINDOW.0, MIN_WINDOW.1));
+        assert!(s.usable_window().is_some());
         s.window = Some((20000.0, 800.0));
         assert_eq!(s.usable_window(), None);
         s.window = Some((900.0, 700.0));

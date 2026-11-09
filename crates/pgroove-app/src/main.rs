@@ -4,7 +4,7 @@ use gpui_kit::component::{Theme, ThemeRegistry, TitleBar};
 use gpui_kit::*;
 use pgroove_core::ProfileStore;
 use pgroove_core::secrets::KeyringStore;
-use pgroove_core::session::SessionState;
+use pgroove_core::session::{MIN_WINDOW, SessionState};
 use pgroove_core::settings::Settings;
 use pgroove_ui::{Startup, Workspace};
 
@@ -69,6 +69,7 @@ fn main() -> anyhow::Result<()> {
                 // are see-through; every themed surface inside the frame is opaque.
                 #[cfg(target_os = "linux")]
                 window_background: WindowBackgroundAppearance::Transparent,
+                window_min_size: Some(size(px(MIN_WINDOW.0), px(MIN_WINDOW.1))),
                 window_decorations: Some(WindowDecorations::Client),
                 ..TitleBar::window_options()
             };

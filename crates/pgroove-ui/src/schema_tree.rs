@@ -100,6 +100,10 @@ pub struct SchemaTree {
     toggled: HashSet<(String, Category)>,
     extensions: Option<Load<Vec<(String, String)>>>,
     extensions_open: bool,
+    /// Lower-cased search text; when set, the tree shows matching objects only.
+    filter: Option<String>,
+    /// Every object of every schema, loaded when a search starts.
+    all: Option<Load<Vec<(String, SchemaObject)>>>,
 }
 
 impl SchemaTree {
@@ -109,8 +113,10 @@ impl SchemaTree {
         open.sort();
         let keep = std::mem::take(&mut self.expanded);
         let toggled = std::mem::take(&mut self.toggled);
+        let filter = self.filter.take();
         let ext_open = self.extensions_open;
         *self = Self::default();
+        self.filter = filter;
         self.expanded = keep;
         self.toggled = toggled;
         self.extensions_open = ext_open;
@@ -137,6 +143,97 @@ impl SchemaTree {
 
     fn category_open(&self, schema: &str, category: Category) -> bool {
         category.default_open() != self.toggled.contains(&(schema.to_string(), category))
+    }
+
+    /// Sets the search text; an empty text leaves search mode.
+    pub fn set_filter(&mut self, text: &str) {
+        let t = text.trim().to_lowercase();
+        self.filter = (!t.is_empty()).then_some(t);
+    }
+
+    /// Whether a search is waiting for the full object list.
+    pub fn needs_all_objects(&self) -> bool {
+        self.filter.is_some() && self.all.is_none()
+    }
+
+    pub fn start_loading_all(&mut self) {
+        self.all = Some(Load::Loading);
+    }
+
+    pub fn set_all_objects(&mut self, result: Result<Vec<(String, SchemaObject)>, String>) {
+        self.all = Some(match result {
+            Ok(v) => Load::Ready(v),
+            Err(e) => Load::Failed(e),
+        });
+    }
+
+    fn filtered_rows(&self, filter: &str) -> Vec<Row> {
+        const MAX_SHOWN: usize = 1000;
+        let all = match &self.all {
+            None | Some(Load::Loading) => return vec![Row::Message("Searching…".into())],
+            Some(Load::Failed(e)) => {
+                return vec![Row::Message(format!("Couldn't search: {e}"))];
+            }
+            Some(Load::Ready(v)) => v,
+        };
+        let (mut rows, mut shown, mut total) = (Vec::new(), 0, 0);
+        let mut i = 0;
+        while i < all.len() {
+            let schema = &all[i].0;
+            let end = all[i..]
+                .iter()
+                .position(|(s, _)| s != schema)
+                .map_or(all.len(), |n| i + n);
+            let schema_match = schema.to_lowercase().contains(filter);
+            let matches: Vec<&SchemaObject> = all[i..end]
+                .iter()
+                .map(|(_, o)| o)
+                .filter(|o| schema_match || o.name.to_lowercase().contains(filter))
+                .collect();
+            i = end;
+            total += matches.len();
+            if matches.is_empty() || shown >= MAX_SHOWN {
+                continue;
+            }
+            rows.push(Row::Schema {
+                name: schema.clone(),
+                expanded: true,
+            });
+            for category in Category::ORDER {
+                let items: Vec<&&SchemaObject> = matches
+                    .iter()
+                    .filter(|o| Category::of(o.kind) == category)
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                rows.push(Row::Category {
+                    schema: schema.clone(),
+                    category,
+                    expanded: true,
+                    count: items.len(),
+                });
+                for o in items {
+                    if shown < MAX_SHOWN {
+                        shown += 1;
+                        rows.push(Row::Object {
+                            schema: schema.clone(),
+                            name: o.name.clone(),
+                            kind: o.kind,
+                        });
+                    }
+                }
+            }
+        }
+        if rows.is_empty() {
+            rows.push(Row::Message("No matches".into()));
+        } else if total > shown {
+            rows.push(Row::Message(format!(
+                "…and {} more. Narrow the search.",
+                total - shown
+            )));
+        }
+        rows
     }
 
     pub fn toggle_extensions(&mut self) {
@@ -178,6 +275,9 @@ impl SchemaTree {
 
     /// Schemas (with their objects when expanded) followed by the extensions section.
     pub fn rows(&self) -> Vec<Row> {
+        if let Some(f) = &self.filter {
+            return self.filtered_rows(f);
+        }
         let msg = |s: &str| vec![Row::Message(s.to_string())];
         let schemas = match &self.schemas {
             None => return Vec::new(),
@@ -373,6 +473,112 @@ mod tests {
         for c in Category::ORDER {
             assert!(!c.label().is_empty());
         }
+    }
+
+    fn all_objects() -> Vec<(String, SchemaObject)> {
+        let o = |s: &str, n: &str, kind| {
+            (
+                s.to_string(),
+                SchemaObject {
+                    name: n.into(),
+                    kind,
+                },
+            )
+        };
+        vec![
+            o("audit", "log", ObjectKind::Table),
+            o("public", "orders", ObjectKind::Table),
+            o("public", "order_items", ObjectKind::Table),
+            o("public", "v_orders", ObjectKind::View),
+            o("public", "customers", ObjectKind::Table),
+            o("public", "f(a integer)", ObjectKind::Function),
+        ]
+    }
+
+    #[test]
+    fn search_filters_across_schemas() {
+        let mut t = SchemaTree::default();
+        t.set_schemas(Ok(vec!["audit".into(), "public".into()]));
+        assert!(!t.needs_all_objects());
+        t.set_filter("  ORDER ");
+        assert!(t.needs_all_objects(), "a search needs the full object list");
+        t.start_loading_all();
+        assert!(!t.needs_all_objects());
+        assert_eq!(t.rows(), [Row::Message("Searching…".into())]);
+        t.set_all_objects(Ok(all_objects()));
+        let rows = t.rows();
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Object { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["orders", "order_items", "v_orders"],
+            "server order is kept"
+        );
+        assert!(matches!(&rows[0], Row::Schema { name, expanded: true } if name == "public"));
+        assert!(rows.iter().any(|r| matches!(
+            r,
+            Row::Category {
+                category: Category::Views,
+                count: 1,
+                expanded: true,
+                ..
+            }
+        )));
+        // A schema name match shows all of that schema's objects.
+        t.set_filter("audit");
+        assert!(matches!(&t.rows()[2], Row::Object { name, .. } if name == "log"));
+        t.set_filter("zzz");
+        assert_eq!(t.rows(), [Row::Message("No matches".into())]);
+        t.set_all_objects(Err("boom".into()));
+        assert_eq!(t.rows(), [Row::Message("Couldn't search: boom".into())]);
+        // Clearing the search returns to the normal tree and keeps the list for next time.
+        t.set_filter("   ");
+        assert!(matches!(
+            &t.rows()[0],
+            Row::Schema {
+                expanded: false,
+                ..
+            }
+        ));
+        t.set_filter("o");
+        assert!(!t.needs_all_objects());
+        // A refresh keeps the search but drops the cached list.
+        t.refresh();
+        assert!(t.needs_all_objects());
+    }
+
+    #[test]
+    fn search_results_are_capped() {
+        let mut t = SchemaTree::default();
+        t.set_filter("t");
+        let many: Vec<(String, SchemaObject)> = (0..1200)
+            .map(|i| {
+                (
+                    "s".to_string(),
+                    SchemaObject {
+                        name: format!("t{i:04}"),
+                        kind: ObjectKind::Table,
+                    },
+                )
+            })
+            .collect();
+        t.set_all_objects(Ok(many));
+        let rows = t.rows();
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r, Row::Object { .. }))
+                .count(),
+            1000
+        );
+        assert_eq!(
+            rows.last(),
+            Some(&Row::Message("…and 200 more. Narrow the search.".into()))
+        );
     }
 
     #[test]

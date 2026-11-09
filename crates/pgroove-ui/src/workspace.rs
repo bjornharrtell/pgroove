@@ -6,6 +6,7 @@ use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
@@ -140,6 +141,8 @@ pub struct Workspace {
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
     http: pgroove_core::update::HttpClient,
+    /// Search box above the schema tree.
+    tree_filter: Entity<InputState>,
 }
 
 /// State loaded from disk before the window opens.
@@ -209,6 +212,14 @@ impl Workspace {
             })
             .collect();
         let next_query = tabs.len() + 1;
+        let tree_filter = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search tables, views, functions…"));
+        cx.subscribe(&tree_filter, |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.apply_tree_filter(cx);
+            }
+        })
+        .detach();
         let mut this = Self {
             tabs,
             active_tab: 0,
@@ -233,6 +244,7 @@ impl Workspace {
             next_session: 1,
             last_session: None,
             update: UpdateState::Idle,
+            tree_filter,
             settings,
             settings_path,
             http: update::http_client(),
@@ -397,6 +409,8 @@ impl Workspace {
                         this.load_extensions(id, cx);
                         this.load_databases(id, cx);
                         this.load_completions(id, cx);
+                        let text = this.tree_filter.read(cx).value().to_string();
+                        this.sync_filter(id, &text, cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
@@ -588,6 +602,50 @@ impl Workspace {
         .detach();
     }
 
+    /// Applies the search box text to every open database.
+    fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
+        let text = self.tree_filter.read(cx).value().to_string();
+        let ids: Vec<usize> = self.sessions.iter().map(|s| s.id).collect();
+        for id in ids {
+            self.sync_filter(id, &text, cx);
+        }
+        cx.notify();
+    }
+
+    fn sync_filter(&mut self, id: usize, text: &str, cx: &mut Context<Self>) {
+        let need = self.session_mut(id).is_some_and(|s| {
+            s.tree.set_filter(text);
+            s.tree.needs_all_objects()
+        });
+        if need {
+            self.load_all_objects(id, cx);
+        }
+    }
+
+    /// Loads every object of the database so a search can look across schemas.
+    fn load_all_objects(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
+            return;
+        };
+        if let Some(s) = self.session_mut(id) {
+            s.tree.start_loading_all();
+        }
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::all_objects(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.session_mut(id) {
+                    s.tree.set_all_objects(result);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Reloads one database's schemas, open schemas' objects, extensions and completion data.
     fn refresh_session(&mut self, id: usize, cx: &mut Context<Self>) {
         let open = match self.session_mut(id) {
@@ -601,6 +659,9 @@ impl Workspace {
         self.load_extensions(id, cx);
         self.load_databases(id, cx);
         self.load_completions(id, cx);
+        if self.session(id).is_some_and(|s| s.tree.needs_all_objects()) {
+            self.load_all_objects(id, cx);
+        }
         cx.notify();
     }
 
@@ -1719,6 +1780,12 @@ impl Workspace {
                                     })),
                             ),
                     ),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .child(Input::new(&self.tree_filter).small()),
             )
             .child(div().flex_1().min_h_0().child(body))
     }
