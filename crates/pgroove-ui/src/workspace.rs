@@ -71,6 +71,14 @@ impl DbSession {
     fn label(&self) -> String {
         format!("{} / {}", self.profile.name, self.profile.database)
     }
+
+    /// Who connects where, for telling servers apart: `user@host:port`.
+    fn detail(&self) -> String {
+        format!(
+            "{}@{}:{}",
+            self.profile.user, self.profile.host, self.profile.port
+        )
+    }
 }
 
 actions!(workspace, [OpenPalette]);
@@ -1983,7 +1991,12 @@ impl Workspace {
                         .xsmall()
                         .icon(IconName::Activity)
                         .label("Activity")
-                        .tooltip("Sessions, locks, statements and more")
+                        .tooltip(
+                            match self.focused_session(cx).and_then(|id| self.session(id)) {
+                                Some(s) => format!("Sessions, locks and more for {}", s.label()),
+                                None => "Sessions, locks, statements and more".to_string(),
+                            },
+                        )
                         .on_click(cx.listener(|this, _, window, cx| {
                             if let Some(sid) = this.focused_session(cx) {
                                 this.open_activity(sid, window, cx);
@@ -2063,6 +2076,93 @@ impl Workspace {
             )
     }
 
+    /// Says which server and database the activity monitor shows, and lets you switch it.
+    fn render_activity_server_bar(
+        &self,
+        view: &Entity<ActivityView>,
+        sid: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let current = self.session(sid);
+        let (label, detail) = match current {
+            Some(s) => {
+                let version = match &s.status {
+                    SessionStatus::Ready { version } => format!(" · PostgreSQL {version}"),
+                    _ => String::new(),
+                };
+                (s.label(), format!("{}{version}", s.detail()))
+            }
+            None => ("No database".to_string(), String::new()),
+        };
+        let choices: Vec<(usize, String)> =
+            self.ready_sessions().map(|s| (s.id, s.label())).collect();
+        let (this, view) = (cx.entity(), view.clone());
+        h_flex()
+            .px_3()
+            .h(px(32.))
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar.opacity(0.5))
+            .child(
+                Icon::new(IconName::Server)
+                    .size_4()
+                    .text_color(theme.success),
+            )
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(detail),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("activity-switch")
+                    .outline()
+                    .xsmall()
+                    .icon(IconName::ChevronsUpDown)
+                    .label("Switch database")
+                    .tooltip("Monitor another open database or server")
+                    .dropdown_menu(move |menu, _, _| {
+                        if choices.is_empty() {
+                            return menu
+                                .item(PopupMenuItem::new("No open databases").disabled(true));
+                        }
+                        choices.iter().fold(menu, |m, (id, label)| {
+                            let (t, view, id) = (this.clone(), view.clone(), *id);
+                            m.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(id == sid)
+                                    .on_click(move |_, _, cx| {
+                                        t.update(cx, |ws, cx| ws.rebind_activity(&view, id, cx))
+                                    }),
+                            )
+                        })
+                    }),
+            )
+    }
+
+    /// Points an activity tab at another open database.
+    fn rebind_activity(&mut self, view: &Entity<ActivityView>, sid: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(sid) else {
+            return;
+        };
+        for t in &mut self.tabs {
+            if let TabKind::Activity(v, s) = t
+                && v == view
+            {
+                *s = sid;
+            }
+        }
+        view.update(cx, |v, cx| v.rebind(client, cx));
+        self.last_session = Some(sid);
+        self.save_session(cx);
+        cx.notify();
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = TabBar::new("tabs")
             .underline()
@@ -2087,7 +2187,10 @@ impl Workspace {
                             })),
                     ),
                 TabKind::Activity(_, sid) => Tab::new()
-                    .label(self.tab_label("Activity", *sid))
+                    .label(match self.session(*sid) {
+                        Some(s) => format!("Activity · {}", s.label()),
+                        None => "Activity".to_string(),
+                    })
                     .prefix(div().px_1().child(Icon::new(IconName::Activity).size_4()))
                     .suffix(
                         Button::new(("close", ix))
@@ -2131,8 +2234,14 @@ impl Workspace {
             Some(TabKind::Table(v, _)) => {
                 div().flex_1().min_h_0().child(v.clone()).into_any_element()
             }
-            Some(TabKind::Activity(v, _)) => {
-                div().flex_1().min_h_0().child(v.clone()).into_any_element()
+            Some(TabKind::Activity(v, sid)) => {
+                let (v, sid) = (v.clone(), *sid);
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_activity_server_bar(&v, sid, cx))
+                    .child(div().flex_1().min_h_0().child(v))
+                    .into_any_element()
             }
             Some(TabKind::Query(q, _)) => {
                 let q = q.clone();

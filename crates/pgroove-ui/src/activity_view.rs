@@ -111,6 +111,16 @@ impl ActivityView {
         monitor::row_pid(self.view, &self.data, row)
     }
 
+    /// Points the monitor at another database's connection and reloads.
+    pub(crate) fn rebind(&mut self, client: Arc<pgroove_core::Client>, cx: &mut Context<Self>) {
+        self.client = client;
+        self.data = ResultSet::default();
+        self.notice = None;
+        self.load = Load::Loading;
+        self.pane.update(cx, |p, cx| p.set_data(None, cx));
+        self.refresh(cx);
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
