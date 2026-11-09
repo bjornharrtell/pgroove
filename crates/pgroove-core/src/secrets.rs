@@ -10,12 +10,34 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, name: &str) -> Result<()>;
 }
 
+/// Installs the platform credential store once and reports why it failed, if it did.
+fn init_keychain() -> Result<()> {
+    static INIT: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        let store = dbus_secret_service_keyring_store::Store::new();
+        #[cfg(target_os = "macos")]
+        let store = apple_native_keyring_store::keychain::Store::new();
+        #[cfg(target_os = "windows")]
+        let store = windows_native_keyring_store::Store::new();
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let store: std::result::Result<std::sync::Arc<keyring_core::mock::Store>, _> =
+            keyring_core::mock::Store::new();
+        store
+            .map(|s| keyring_core::set_default_store(s))
+            .map_err(|e| format!("no credential store is available: {e}"))
+    })
+    .clone()
+    .map_err(anyhow::Error::msg)
+}
+
 /// OS keychain backed store.
 pub struct KeyringStore;
 
 impl KeyringStore {
-    fn entry(name: &str) -> Result<keyring::Entry> {
-        Ok(keyring::Entry::new("pgroove", name)?)
+    fn entry(name: &str) -> Result<keyring_core::Entry> {
+        init_keychain()?;
+        Ok(keyring_core::Entry::new("pgroove", name)?)
     }
 }
 
@@ -23,7 +45,7 @@ impl SecretStore for KeyringStore {
     fn get(&self, name: &str) -> Result<Option<String>> {
         match Self::entry(name)?.get_password() {
             Ok(p) => Ok(Some(p)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -34,7 +56,7 @@ impl SecretStore for KeyringStore {
 
     fn delete(&self, name: &str) -> Result<()> {
         match Self::entry(name)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }

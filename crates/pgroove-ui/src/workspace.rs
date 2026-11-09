@@ -58,7 +58,7 @@ impl SessionStatus {
 struct DbSession {
     id: usize,
     profile: ConnectionProfile,
-    client: Option<Arc<tokio_postgres::Client>>,
+    client: Option<Arc<pgroove_core::Client>>,
     status: SessionStatus,
     tree: SchemaTree,
     /// Databases of the server, as listed by this session.
@@ -80,8 +80,8 @@ enum UpdateState {
     Idle,
     Checking,
     Available(Release),
-    Installing(semver::Version),
-    Ready(semver::Version),
+    Installing(pgroove_core::update::Version),
+    Ready(pgroove_core::update::Version),
 }
 
 /// Left padding of the first tree level and the extra indent per level.
@@ -139,7 +139,7 @@ pub struct Workspace {
     update: UpdateState,
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
-    http: reqwest::Client,
+    http: pgroove_core::update::HttpClient,
 }
 
 /// State loaded from disk before the window opens.
@@ -235,11 +235,7 @@ impl Workspace {
             update: UpdateState::Idle,
             settings,
             settings_path,
-            http: reqwest::Client::builder()
-                .user_agent(concat!("pgroove/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            http: update::http_client(),
         };
         cx.on_app_quit(|this, cx| {
             this.save_session(cx);
@@ -285,7 +281,7 @@ impl Workspace {
         self.sessions.iter_mut().find(|s| s.id == id)
     }
 
-    fn client_of(&self, id: usize) -> Option<Arc<tokio_postgres::Client>> {
+    fn client_of(&self, id: usize) -> Option<Arc<pgroove_core::Client>> {
         self.session(id).and_then(|s| s.client.clone())
     }
 

@@ -4,7 +4,8 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use semver::Version;
+pub use reqwest::Client as HttpClient;
+pub use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -67,8 +68,19 @@ impl Release {
     }
 }
 
+/// An HTTP client for update checks and downloads (rustls with the `ring` provider).
+pub fn http_client() -> HttpClient {
+    // Installing twice is harmless: the first provider wins.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    HttpClient::builder()
+        .user_agent(concat!("pgroove/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Fetches the latest release from `url` (normally [`LATEST_RELEASE_URL`]).
-pub async fn fetch_latest(http: &reqwest::Client, url: &str) -> Result<Release> {
+pub async fn fetch_latest(http: &HttpClient, url: &str) -> Result<Release> {
     let api: ApiRelease = http
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -160,7 +172,7 @@ pub fn verify_sha256(bytes: &[u8], sidecar: &str) -> Result<()> {
     Ok(())
 }
 
-async fn get_bytes(http: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<u8>> {
+async fn get_bytes(http: &HttpClient, url: &str, limit: u64) -> Result<Vec<u8>> {
     let mut resp = http.get(url).send().await?.error_for_status()?;
     if resp.content_length().is_some_and(|n| n > limit) {
         bail!("the download is larger than expected");
@@ -177,7 +189,7 @@ async fn get_bytes(http: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<
 
 /// Downloads an asset and verifies it against the `<name>.sha256` file published next to it.
 pub async fn download_verified(
-    http: &reqwest::Client,
+    http: &HttpClient,
     release: &Release,
     asset: &Asset,
 ) -> Result<Vec<u8>> {
@@ -516,7 +528,7 @@ mod tests {
             ]
         });
         let api = serve(vec![("/latest", latest.to_string().into_bytes())]).await;
-        let http = reqwest::Client::new();
+        let http = http_client();
         let rel = fetch_latest(&http, &format!("{api}/latest")).await.unwrap();
         assert_eq!(rel.version, Version::new(9, 9, 9));
         assert_eq!(rel.notes, "notes");

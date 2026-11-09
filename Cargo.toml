@@ -9,9 +9,14 @@ publish = false
 license = "MIT"
 
 [workspace.dependencies]
+anyhow = "1"
+env_logger = "0.11"
 gpui-kit = { version = "0.9.1", features = ["tree-sitter-sql"] }
 log = "0.4"
-env_logger = "0.11"
+pgroove-core = { path = "crates/pgroove-core" }
+pgroove-ui = { path = "crates/pgroove-ui" }
+tokio = "1"
+tokio-postgres = "0.7"
 
 # Optimise heavy dependencies in dev builds; unoptimised GPUI layout and text
 # code runs several times slower (measured ~3 fps vs ~22 fps on a text-heavy view).

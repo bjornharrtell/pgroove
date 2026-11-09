@@ -22,7 +22,7 @@ enum Load {
 
 pub struct StructureView {
     table: TableRef,
-    client: Arc<tokio_postgres::Client>,
+    client: Arc<pgroove_core::Client>,
     runtime: Arc<Runtime>,
     load: Load,
     generation: u64,
@@ -33,7 +33,7 @@ impl EventEmitter<OpenTable> for StructureView {}
 impl StructureView {
     pub fn new(
         table: TableRef,
-        client: Arc<tokio_postgres::Client>,
+        client: Arc<pgroove_core::Client>,
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) -> Self {

@@ -37,7 +37,7 @@ pub struct TableView {
     notice: Option<(String, bool)>,
     structure: Option<Entity<StructureView>>,
     table: TableRef,
-    client: Arc<tokio_postgres::Client>,
+    client: Arc<pgroove_core::Client>,
     runtime: Arc<Runtime>,
     pane: Entity<GridPane>,
     filter: Entity<InputState>,
@@ -66,7 +66,7 @@ impl EventEmitter<OpenTable> for TableView {}
 impl TableView {
     pub fn new(
         table: TableRef,
-        client: Arc<tokio_postgres::Client>,
+        client: Arc<pgroove_core::Client>,
         runtime: Arc<Runtime>,
         window: &mut Window,
         cx: &mut Context<Self>,

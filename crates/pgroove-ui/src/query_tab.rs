@@ -77,7 +77,7 @@ pub fn one_line(sql: &str, max: usize) -> String {
 
 pub struct QueryTab {
     runtime: Arc<Runtime>,
-    client: Option<Arc<tokio_postgres::Client>>,
+    client: Option<Arc<pgroove_core::Client>>,
     editor: Entity<EditorState>,
     results: Entity<GridPane>,
     run: RunState,
@@ -138,7 +138,7 @@ impl QueryTab {
     pub(crate) fn bind(
         &mut self,
         session: Option<usize>,
-        client: Option<Arc<tokio_postgres::Client>>,
+        client: Option<Arc<pgroove_core::Client>>,
         index: Option<pgroove_core::completion::Index>,
         cx: &mut Context<Self>,
     ) {

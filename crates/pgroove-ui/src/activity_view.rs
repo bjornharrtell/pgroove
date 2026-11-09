@@ -46,7 +46,7 @@ enum Load {
 }
 
 pub struct ActivityView {
-    client: Arc<tokio_postgres::Client>,
+    client: Arc<pgroove_core::Client>,
     runtime: Arc<Runtime>,
     view: View,
     pane: Entity<GridPane>,
@@ -60,7 +60,7 @@ pub struct ActivityView {
 
 impl ActivityView {
     pub fn new(
-        client: Arc<tokio_postgres::Client>,
+        client: Arc<pgroove_core::Client>,
         runtime: Arc<Runtime>,
         window: &mut Window,
         cx: &mut Context<Self>,

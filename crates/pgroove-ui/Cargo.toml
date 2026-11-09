@@ -6,12 +6,9 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 gpui-kit.workspace = true
 log.workspace = true
-pgroove-core = { path = "../pgroove-core" }
-tokio = { version = "1", features = ["rt-multi-thread"] }
-tokio-postgres = "0.7"
-lsp-types = { version = "0.97.0", features = ["proposed"] }
-semver = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+lsp-types = { version = "0.97", features = ["proposed"] }
+pgroove-core.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

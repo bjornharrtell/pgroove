@@ -22,3 +22,5 @@ pub mod update;
 
 pub use profile::{ConnectionProfile, SslMode};
 pub use store::ProfileStore;
+/// The database client type, re-exported so UI code needn't depend on the driver.
+pub use tokio_postgres::Client;
