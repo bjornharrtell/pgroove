@@ -4852,6 +4852,7 @@ dependencies = [
  "keyring",
  "log",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-postgres",

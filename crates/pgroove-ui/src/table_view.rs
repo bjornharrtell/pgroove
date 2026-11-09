@@ -5,13 +5,12 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::data::{self, PageRequest, Sort, TableRef};
 use tokio::runtime::Runtime;
 
-use crate::results::ResultsTable;
+use crate::grid_pane::GridPane;
 
 pub const PAGE_SIZE: u64 = 200;
 
@@ -25,7 +24,7 @@ pub struct TableView {
     table: TableRef,
     client: Arc<tokio_postgres::Client>,
     runtime: Arc<Runtime>,
-    grid: Entity<TableState<ResultsTable>>,
+    pane: Entity<GridPane>,
     filter: Entity<InputState>,
     page: u64,
     sort: Option<Sort>,
@@ -55,7 +54,8 @@ impl TableView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let grid = cx.new(|cx| TableState::new(ResultsTable::sortable(), window, cx));
+        let pane = cx.new(|cx| GridPane::new(true, window, cx));
+        let grid = pane.read(cx).grid().clone();
         let filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter, e.g. total > 100"));
         let subs = vec![
@@ -75,7 +75,7 @@ impl TableView {
             table,
             client,
             runtime,
-            grid,
+            pane,
             filter,
             page: 0,
             sort: None,
@@ -96,12 +96,19 @@ impl TableView {
 
     fn set_sort(&mut self, req: Option<(usize, bool)>, cx: &mut Context<Self>) {
         self.sort = req.and_then(|(ix, descending)| {
-            let column = self.grid.read(cx).delegate().column_name(ix)?.to_string();
+            let column = self
+                .pane
+                .read(cx)
+                .grid()
+                .read(cx)
+                .delegate()
+                .column_name(ix)?
+                .to_string();
             Some(Sort { column, descending })
         });
         let shown = req.filter(|_| self.sort.is_some());
-        self.grid
-            .update(cx, |g, _| g.delegate_mut().set_sorted(shown));
+        let grid = self.pane.read(cx).grid().clone();
+        grid.update(cx, |g, _| g.delegate_mut().set_sorted(shown));
         self.page = 0;
         self.reload(cx);
     }
@@ -143,10 +150,8 @@ impl TableView {
                     Ok(page) => {
                         this.rows = page.data.rows.len();
                         this.has_more = page.has_more;
-                        this.grid.update(cx, |g, cx| {
-                            g.delegate_mut().set(Some(&page.data));
-                            g.refresh(cx);
-                        });
+                        this.pane
+                            .update(cx, |p, cx| p.set_data(Some(&page.data), cx));
                         this.load = Load::Ready;
                     }
                     Err(e) => this.load = Load::Failed(e),
@@ -173,7 +178,7 @@ impl Render for TableView {
             _ => div()
                 .flex_1()
                 .min_h_0()
-                .child(DataTable::new(&self.grid))
+                .child(self.pane.clone())
                 .into_any_element(),
         };
         let status = match self.load {
@@ -191,6 +196,7 @@ impl Render for TableView {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(div().flex_1().child(Input::new(&self.filter)))
+                    .child(self.pane.read(cx).actions())
                     .child(
                         Button::new("reload")
                             .ghost()

@@ -25,6 +25,14 @@ impl ResultsTable {
         }
     }
 
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub fn rows(&self) -> &[Vec<Option<String>>] {
+        &self.rows
+    }
+
     pub fn column_name(&self, ix: usize) -> Option<&str> {
         self.names.get(ix).map(String::as_str)
     }

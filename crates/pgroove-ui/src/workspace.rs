@@ -6,7 +6,6 @@ use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,7 +18,7 @@ use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
 use crate::connections::ConnectionForm;
-use crate::results::ResultsTable;
+use crate::grid_pane::GridPane;
 use crate::schema_tree::{Row, SchemaTree};
 use crate::table_view::TableView;
 
@@ -72,7 +71,7 @@ pub struct Workspace {
     client: Option<Arc<tokio_postgres::Client>>,
     tree: SchemaTree,
     editor: Entity<EditorState>,
-    results: Entity<TableState<ResultsTable>>,
+    results: Entity<GridPane>,
     run: RunState,
     output: Option<QueryOutput>,
     bottom: BottomTab,
@@ -95,7 +94,7 @@ impl Workspace {
                 .soft_wrap(false)
                 .placeholder("select now();")
         });
-        let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
+        let results = cx.new(|cx| GridPane::new(false, window, cx));
         Self {
             editor,
             results,
@@ -268,10 +267,8 @@ impl Workspace {
                 } else {
                     BottomTab::Messages
                 };
-                self.results.update(cx, |t, cx| {
-                    t.delegate_mut().set(set.as_ref());
-                    t.refresh(cx);
-                });
+                self.results
+                    .update(cx, |p, cx| p.set_data(set.as_ref(), cx));
                 self.output = Some(out);
             }
             Err(e) => {
@@ -673,6 +670,7 @@ impl Workspace {
             .child(tab("tab-messages", "Messages", BottomTab::Messages))
             .child(div().flex_1())
             .child(div().text_color(theme.muted_foreground).child(summary))
+            .child(self.results.read(cx).actions())
     }
 
     fn render_results_body(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -701,7 +699,7 @@ impl Workspace {
             div()
                 .flex_1()
                 .min_h_0()
-                .child(DataTable::new(&self.results))
+                .child(self.results.clone())
                 .into_any_element()
         } else {
             div()

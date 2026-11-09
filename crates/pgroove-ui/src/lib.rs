@@ -1,6 +1,7 @@
 //! gpui views built on gpui-kit.
 
 mod connections;
+mod grid_pane;
 mod results;
 mod schema_tree;
 mod table_view;
