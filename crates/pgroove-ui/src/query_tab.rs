@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
@@ -399,7 +400,7 @@ impl QueryTab {
                             ),
                         ),
                 )
-                .on_ok(|_, _, _| true)
+                .actions("Close", false, |_, _, _| true)
         });
     }
 
@@ -505,7 +506,7 @@ impl QueryTab {
                                 .children(rows),
                         ),
                 )
-                .on_ok(|_, _, _| true)
+                .actions("Close", false, |_, _, _| true)
         });
     }
 

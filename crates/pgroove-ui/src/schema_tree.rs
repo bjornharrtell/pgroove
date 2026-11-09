@@ -14,6 +14,10 @@ pub enum Load<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
+    Database {
+        name: String,
+        current: bool,
+    },
     Schema {
         name: String,
         expanded: bool,
@@ -41,6 +45,8 @@ pub struct SchemaTree {
     expanded: HashSet<String>,
     extensions: Option<Load<Vec<(String, String)>>>,
     extensions_open: bool,
+    databases: Option<Load<Vec<String>>>,
+    current_db: Option<String>,
 }
 
 impl SchemaTree {
@@ -54,13 +60,26 @@ impl SchemaTree {
         open.sort();
         let keep = std::mem::take(&mut self.expanded);
         let ext_open = self.extensions_open;
+        let current = self.current_db.take();
         *self = Self::default();
+        self.current_db = current;
         self.expanded = keep;
         self.extensions_open = ext_open;
         for name in &open {
             self.objects.insert(name.clone(), Load::Loading);
         }
         open
+    }
+
+    pub fn set_current_database(&mut self, name: &str) {
+        self.current_db = Some(name.to_string());
+    }
+
+    pub fn set_databases(&mut self, result: Result<Vec<String>, String>) {
+        self.databases = Some(match result {
+            Ok(v) => Load::Ready(v),
+            Err(e) => Load::Failed(e),
+        });
     }
 
     pub fn set_extensions(&mut self, result: Result<Vec<(String, String)>, String>) {
@@ -107,7 +126,37 @@ impl SchemaTree {
         false
     }
 
+    /// Databases of the server with the connected one expanded to its schemas.
     pub fn rows(&self) -> Vec<Row> {
+        let current = match &self.current_db {
+            Some(c) => c.clone(),
+            None => return self.current_rows(),
+        };
+        let others: Vec<String> = match &self.databases {
+            Some(Load::Ready(dbs)) => dbs.iter().filter(|d| **d != current).cloned().collect(),
+            _ => Vec::new(),
+        };
+        let mut names: Vec<String> = others;
+        names.push(current.clone());
+        names.sort();
+        let mut rows = Vec::new();
+        for name in names {
+            let is_current = name == current;
+            rows.push(Row::Database {
+                name,
+                current: is_current,
+            });
+            if is_current {
+                rows.extend(self.current_rows());
+            }
+        }
+        if let Some(Load::Failed(e)) = &self.databases {
+            rows.push(Row::Message(format!("Couldn't list databases: {e}")));
+        }
+        rows
+    }
+
+    fn current_rows(&self) -> Vec<Row> {
         let msg = |s: &str| vec![Row::Message(s.to_string())];
         let schemas = match &self.schemas {
             None => return Vec::new(),
@@ -204,6 +253,52 @@ mod tests {
         assert!(t.rows().contains(&Row::Message("Couldn't load: x".into())));
         t.reset();
         assert!(t.rows().is_empty());
+    }
+
+    #[test]
+    fn database_rows() {
+        let mut t = SchemaTree::default();
+        t.set_schemas(Ok(vec!["public".into()]));
+        assert!(
+            matches!(&t.rows()[0], Row::Schema { .. }),
+            "no db level before connecting"
+        );
+        t.set_current_database("b");
+        assert_eq!(
+            t.rows()[0],
+            Row::Database {
+                name: "b".into(),
+                current: true
+            }
+        );
+        assert_eq!(t.rows().len(), 2);
+        t.set_databases(Ok(vec!["a".into(), "b".into(), "c".into()]));
+        let rows = t.rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows[0],
+            Row::Database {
+                name: "a".into(),
+                current: false
+            }
+        );
+        assert!(matches!(&rows[2], Row::Schema { .. }));
+        assert_eq!(
+            rows[3],
+            Row::Database {
+                name: "c".into(),
+                current: false
+            }
+        );
+        t.set_databases(Err("nope".into()));
+        assert!(
+            t.rows()
+                .iter()
+                .any(|r| matches!(r, Row::Message(m) if m.contains("list databases")))
+        );
+        let again = t.refresh();
+        assert!(again.is_empty());
+        assert_eq!(t.rows().len(), 1, "current database survives a refresh");
     }
 
     #[test]

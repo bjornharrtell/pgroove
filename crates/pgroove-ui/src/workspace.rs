@@ -1,6 +1,7 @@
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
@@ -73,6 +74,8 @@ pub struct Workspace {
     history: Arc<Mutex<History>>,
     snippets: Arc<Mutex<Snippets>>,
     next_query: usize,
+    /// The profile of the current connection, used to switch databases.
+    active_profile: Option<ConnectionProfile>,
     session_path: Option<std::path::PathBuf>,
     window_size: Option<(f32, f32)>,
     /// Table tabs to reopen once the restored connection is up.
@@ -138,6 +141,7 @@ impl Workspace {
             tabs,
             active_tab: 0,
             next_query,
+            active_profile: None,
             session_path,
             window_size: None,
             pending_tables: session
@@ -217,6 +221,8 @@ impl Workspace {
         if let Ok(mut s) = self.completions.write() {
             *s = None;
         }
+        self.tree.set_current_database(&profile.database);
+        self.active_profile = Some(profile.clone());
         self.status = Status::Connecting(profile.name.clone());
         cx.notify();
         let secrets = self.secrets.clone();
@@ -242,6 +248,7 @@ impl Workspace {
                         this.load_schemas(cx);
                         this.load_completions(cx);
                         this.load_extensions(cx);
+                        this.load_databases(cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
@@ -272,6 +279,31 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    fn load_databases(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::databases(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                this.tree.set_databases(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reconnects the active profile to another database of the same server.
+    fn switch_database(&mut self, database: String, cx: &mut Context<Self>) {
+        if let Some(p) = self.active_profile.clone() {
+            self.connect(ConnectionProfile { database, ..p }, cx);
+        }
     }
 
     fn load_extensions(&mut self, cx: &mut Context<Self>) {
@@ -322,6 +354,7 @@ impl Workspace {
             self.fetch_objects(schema, cx);
         }
         self.load_extensions(cx);
+        self.load_databases(cx);
         self.load_completions(cx);
         cx.notify();
     }
@@ -619,6 +652,7 @@ impl Workspace {
         self.sync_query_clients(cx);
         self.close_table_tabs();
         self.tree.reset();
+        self.active_profile = None;
         if let Ok(mut s) = self.completions.write() {
             *s = None;
         }
@@ -733,7 +767,7 @@ impl Workspace {
                 .title(title)
                 .w(px(420.))
                 .child(form.render(cx, test.clone()))
-                .on_ok(move |_, window, cx| {
+                .actions("Save", true, move |_, window, cx| {
                     let values = form_ok.values(cx);
                     let result = values
                         .profile
@@ -789,10 +823,40 @@ impl Workspace {
             .into_iter()
             .enumerate()
             .map(|(i, row)| match row {
+                Row::Database { name, current } => {
+                    let target = name.clone();
+                    let mut row = self
+                        .tree_row(("database", i), 1, cx)
+                        .child(
+                            Icon::new(if current {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size_4()
+                            .text_color(muted),
+                        )
+                        .child(Icon::new(IconName::Database).size_4().text_color(muted))
+                        .child(div().truncate().child(name));
+                    if current {
+                        row = row.font_weight(FontWeight::MEDIUM);
+                    } else {
+                        row = row
+                            .cursor_pointer()
+                            .hover(move |d| d.bg(hover))
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Connect to this database").build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.switch_database(target.clone(), cx)
+                            }));
+                    }
+                    row.into_any_element()
+                }
                 Row::Schema { name, expanded } => {
                     let n = name.clone();
                     let (refresh_this, copy_name) = (this.clone(), name.clone());
-                    self.tree_row(("schema", i), 1, cx)
+                    self.tree_row(("schema", i), 2, cx)
                         .cursor_pointer()
                         .hover(move |d| d.bg(hover))
                         .child(
@@ -841,7 +905,7 @@ impl Workspace {
                     let (s, n) = (schema.clone(), name.clone());
                     let ctx_this = this.clone();
                     let row = self
-                        .tree_row(("object", i), 3, cx)
+                        .tree_row(("object", i), 4, cx)
                         .child(Icon::new(icon).size_4().text_color(muted))
                         .child(name.clone())
                         .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
@@ -925,7 +989,7 @@ impl Workspace {
                     .into_any_element()
                 }
                 Row::ExtensionsHeader { expanded, count } => self
-                    .tree_row(("extensions", i), 1, cx)
+                    .tree_row(("extensions", i), 2, cx)
                     .cursor_pointer()
                     .hover(move |d| d.bg(hover))
                     .child(
@@ -945,13 +1009,13 @@ impl Workspace {
                     }))
                     .into_any_element(),
                 Row::Extension { name, version } => self
-                    .tree_row(("extension", i), 3, cx)
+                    .tree_row(("extension", i), 4, cx)
                     .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
                     .child(name)
                     .child(div().text_xs().text_color(muted).child(version))
                     .into_any_element(),
                 Row::Message(m) => div()
-                    .pl(px(52.))
+                    .pl(px(66.))
                     .h(px(24.))
                     .flex()
                     .items_center()
@@ -1115,7 +1179,13 @@ impl Workspace {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_read_only(cx)));
         let theme = cx.theme();
         let (label, color) = match &self.status {
-            Status::Connected { name, .. } => (name.clone(), theme.success),
+            Status::Connected { name, .. } => (
+                match &self.active_profile {
+                    Some(p) => format!("{name} / {}", p.database),
+                    None => name.clone(),
+                },
+                theme.success,
+            ),
             Status::Connecting(n) => (format!("{n}…"), theme.muted_foreground),
             Status::Failed(_) => ("Connection failed".into(), theme.danger),
             Status::Idle => ("No connection".into(), theme.muted_foreground),

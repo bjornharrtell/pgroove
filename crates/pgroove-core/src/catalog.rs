@@ -76,6 +76,18 @@ pub struct SchemaObject {
     pub kind: ObjectKind,
 }
 
+/// Databases that accept connections (templates excluded), sorted by name.
+pub async fn databases(client: &Client) -> Result<Vec<String>> {
+    let rows = client
+        .query(
+            "select datname::text from pg_database \
+             where datallowconn and not datistemplate order by 1",
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
 /// User-visible schemas (system schemas excluded), sorted by name.
 pub async fn schemas(client: &Client) -> Result<Vec<String>> {
     let rows = client
@@ -282,6 +294,9 @@ mod tests {
                 .is_err()
         );
         assert!(extensions(&client).await.is_ok());
+        let dbs = databases(&client).await.unwrap();
+        assert!(dbs.contains(&"postgres".to_string()));
+        assert!(!dbs.iter().any(|d| d.starts_with("template")));
         client
             .batch_execute("drop schema pgroove_k cascade")
             .await

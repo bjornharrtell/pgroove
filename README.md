@@ -8,7 +8,7 @@ Requires PostgreSQL 13 or newer on the server.
 
 - **Connections:** saved profiles, passwords in the OS keychain, connection URI import,
   TLS modes (`disable`, `prefer`, `require`, `verify-full`), test connection.
-- **Schema browser:** lazy tree of schemas, tables, views, sequences, types, functions and
+- **Schema browser:** lists every database on the server (click one to connect to it), then a lazy tree of schemas, tables, views, sequences, types, functions and
   extensions, with context menus (open data or structure, copy name, show definition).
 - **SQL editor:** several tabs, syntax highlighting, schema-aware completion, formatter,
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`

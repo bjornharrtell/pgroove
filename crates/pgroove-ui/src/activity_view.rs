@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::*;
@@ -171,7 +172,7 @@ impl ActivityView {
             dialog
                 .title(action.title(pid))
                 .w(px(460.))
-                .on_ok(move |_, _, cx| {
+                .actions("Confirm", true, move |_, _, cx| {
                     this.update(cx, |t, cx| t.run_action(action, pid, cx));
                     true
                 })

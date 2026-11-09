@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -185,7 +186,7 @@ impl TableView {
                         )
                         .children(fields),
                 )
-                .on_ok(move |_, _, cx| {
+                .actions("Add row", true, move |_, _, cx| {
                     let values: Vec<Option<String>> = inputs
                         .iter()
                         .map(|i| {
@@ -237,7 +238,7 @@ impl TableView {
                         .text_xs()
                         .children(sql.iter().map(|s| div().child(format!("{s};")))),
                 )
-                .on_ok(move |_, _, cx| {
+                .actions("Apply changes", true, move |_, _, cx| {
                     this.update(cx, |tv, cx| tv.apply(cx));
                     true
                 })
