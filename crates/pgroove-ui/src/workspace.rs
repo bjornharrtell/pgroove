@@ -2,19 +2,23 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
+use pgroove_core::query::{self, QueryOutput};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
 use crate::connections::ConnectionForm;
+use crate::results::ResultsTable;
 use crate::schema_tree::{Row, SchemaTree};
 
 /// Connection lifecycle shown in the status bar.
@@ -37,6 +41,21 @@ impl Status {
     }
 }
 
+actions!(workspace, [RunQuery, CancelQuery]);
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RunState {
+    Idle,
+    Running,
+    Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BottomTab {
+    Results,
+    Messages,
+}
+
 /// Top-level window view: sidebar, main area, status bar.
 pub struct Workspace {
     store: ProfileStore,
@@ -45,11 +64,35 @@ pub struct Workspace {
     status: Status,
     client: Option<Arc<tokio_postgres::Client>>,
     tree: SchemaTree,
+    editor: Entity<EditorState>,
+    results: Entity<TableState<ResultsTable>>,
+    run: RunState,
+    output: Option<QueryOutput>,
+    bottom: BottomTab,
 }
 
 impl Workspace {
-    pub fn new(store: ProfileStore, secrets: Arc<dyn SecretStore>, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        store: ProfileStore,
+        secrets: Arc<dyn SecretStore>,
+        runtime: Arc<Runtime>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("sql".to_string())
+                .line_number(true)
+                .soft_wrap(false)
+                .placeholder("select now();")
+        });
+        let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
         Self {
+            editor,
+            results,
+            run: RunState::Idle,
+            output: None,
+            bottom: BottomTab::Results,
             store,
             secrets,
             runtime,
@@ -132,6 +175,79 @@ impl Workspace {
                 })
                 .detach();
             }
+        }
+        cx.notify();
+    }
+
+    fn run_query(&mut self, cx: &mut Context<Self>) {
+        if self.run == RunState::Running {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.run = RunState::Failed("Connect to a database first.".into());
+            self.bottom = BottomTab::Messages;
+            cx.notify();
+            return;
+        };
+        let editor = self.editor.read(cx);
+        let selected = editor.selected_text().to_string();
+        let sql = if selected.trim().is_empty() {
+            editor.value().to_string()
+        } else {
+            selected
+        };
+        if sql.trim().is_empty() {
+            return;
+        }
+        self.run = RunState::Running;
+        cx.notify();
+        let task = self
+            .runtime
+            .spawn(async move { query::run(&client, &sql, query::MAX_ROWS).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                this.finish_query(result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_query(&mut self, result: Result<QueryOutput, String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(out) => {
+                self.run = RunState::Idle;
+                let set = out.last_rowset().cloned();
+                self.bottom = if set.is_some() {
+                    BottomTab::Results
+                } else {
+                    BottomTab::Messages
+                };
+                self.results.update(cx, |t, cx| {
+                    t.delegate_mut().set(set.as_ref());
+                    t.refresh(cx);
+                });
+                self.output = Some(out);
+            }
+            Err(e) => {
+                self.run = RunState::Failed(e);
+                self.bottom = BottomTab::Messages;
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_query(&mut self, cx: &mut Context<Self>) {
+        if self.run != RunState::Running {
+            return;
+        }
+        if let Some(client) = self.client.clone() {
+            self.runtime.spawn(async move {
+                if let Err(e) = query::cancel(&client).await {
+                    log::warn!("cancel failed: {e:#}");
+                }
+            });
         }
         cx.notify();
     }
@@ -466,6 +582,87 @@ impl Workspace {
             )
     }
 
+    fn render_results_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let tab = |id: &'static str, label: &'static str, which: BottomTab| {
+            let on = self.bottom == which;
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_color(if on {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.bottom = which;
+                    cx.notify();
+                }))
+        };
+        let summary = match (&self.run, &self.output) {
+            (RunState::Running, _) => "Running…".to_string(),
+            (_, Some(o)) => {
+                let n = o.last_rowset().map(|s| s.count).unwrap_or(0);
+                format!("{n} rows · {} ms", o.elapsed.as_millis())
+            }
+            _ => String::new(),
+        };
+        h_flex()
+            .gap_4()
+            .px_3()
+            .h(px(34.))
+            .items_center()
+            .text_xs()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(tab("tab-results", "Results", BottomTab::Results))
+            .child(tab("tab-messages", "Messages", BottomTab::Messages))
+            .child(div().flex_1())
+            .child(div().text_color(theme.muted_foreground).child(summary))
+    }
+
+    fn render_results_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let note = |text: String, color: Hsla| {
+            div()
+                .flex_1()
+                .p_3()
+                .text_sm()
+                .text_color(color)
+                .child(text)
+                .into_any_element()
+        };
+        if self.bottom == BottomTab::Messages {
+            if let RunState::Failed(e) = &self.run {
+                return note(e.clone(), theme.danger);
+            }
+            let text = self
+                .output
+                .as_ref()
+                .map(|o| o.messages().join("\n"))
+                .unwrap_or_else(|| "No messages.".into());
+            return note(text, theme.foreground);
+        }
+        if self.output.as_ref().and_then(|o| o.last_rowset()).is_some() {
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(DataTable::new(&self.results))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("Run a query to see results.")
+                .into_any_element()
+        }
+    }
+
     fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let strip = || {
@@ -495,41 +692,36 @@ impl Workspace {
                             .outline()
                             .xsmall()
                             .icon(IconName::Play)
-                            .label("Run · Ctrl+Enter"),
+                            .label("Run · Ctrl+Enter")
+                            .loading(self.run == RunState::Running)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_query(cx))),
                     )
                     .child(Button::new("explain").outline().xsmall().label("Explain"))
-                    .child(Button::new("cancel").ghost().xsmall().label("Cancel")),
+                    .child(
+                        Button::new("cancel")
+                            .ghost()
+                            .xsmall()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
+                    ),
             )
             .child(
                 div()
-                    .h(px(150.))
+                    .h(px(170.))
                     .flex_shrink_0()
-                    .p_3()
                     .border_b_1()
                     .border_color(theme.border)
-                    .font_family(theme.mono_font_family.clone())
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("-- SQL editor arrives in the next milestone"),
+                    .child(
+                        Editor::new(&self.editor)
+                            .bordered(false)
+                            .p_0()
+                            .h_full()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(theme.mono_font_size),
+                    ),
             )
-            .child(
-                strip()
-                    .gap_4()
-                    .text_xs()
-                    .child(div().text_color(theme.foreground).child("Results"))
-                    .child(div().text_color(theme.muted_foreground).child("Messages"))
-                    .child(div().text_color(theme.muted_foreground).child("Plan")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Run a query to see results."),
-            )
+            .child(self.render_results_header(cx))
+            .child(self.render_results_body(cx))
     }
 }
 
@@ -553,6 +745,9 @@ impl Render for Workspace {
         };
         v_flex()
             .size_full()
+            .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &RunQuery, _, cx| this.run_query(cx)))
+            .on_action(cx.listener(|this, _: &CancelQuery, _, cx| this.cancel_query(cx)))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(cx))

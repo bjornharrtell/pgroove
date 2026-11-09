@@ -16,13 +16,14 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             Theme::sync_system_appearance(None, cx);
+            pgroove_ui::init(cx);
             gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
                 window
                     .observe_window_appearance(|window, cx| {
                         Theme::sync_system_appearance(Some(window), cx)
                     })
                     .detach();
-                cx.new(|_| Workspace::new(store, Arc::new(KeyringStore), runtime))
+                cx.new(|cx| Workspace::new(store, Arc::new(KeyringStore), runtime, window, cx))
             })
             .expect("failed to open window");
             log::info!("pgroove started");

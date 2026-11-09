@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod connect;
 pub mod profile;
+pub mod query;
 pub mod secrets;
 pub mod store;
 

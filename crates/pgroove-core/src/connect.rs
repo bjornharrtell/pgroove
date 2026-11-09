@@ -40,6 +40,22 @@ pub async fn connect(
     Ok((client, row.get(0)))
 }
 
+/// Test helper: connects using `PGROOVE_TEST_PG=host:port:user:password:db`, if set.
+#[cfg(test)]
+pub(crate) async fn test_connection() -> Option<(Client, String)> {
+    let spec = std::env::var("PGROOVE_TEST_PG").ok()?;
+    let f: Vec<&str> = spec.splitn(5, ':').collect();
+    let p = ConnectionProfile {
+        name: "live".into(),
+        host: f[0].into(),
+        port: f[1].parse().unwrap(),
+        user: f[2].into(),
+        database: f[4].into(),
+    };
+    let pw = (!f[3].is_empty()).then_some(f[3]);
+    Some(connect(&p, pw).await.unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,19 +94,9 @@ mod tests {
     /// Runs against a live server when `PGROOVE_TEST_PG=host:port:user:password:db` is set.
     #[tokio::test]
     async fn connect_live_server() {
-        let Ok(spec) = std::env::var("PGROOVE_TEST_PG") else {
+        let Some((client, version)) = test_connection().await else {
             return;
         };
-        let f: Vec<&str> = spec.splitn(5, ':').collect();
-        let p = ConnectionProfile {
-            name: "live".into(),
-            host: f[0].into(),
-            port: f[1].parse().unwrap(),
-            user: f[2].into(),
-            database: f[4].into(),
-        };
-        let pw = (!f[3].is_empty()).then_some(f[3]);
-        let (client, version) = connect(&p, pw).await.unwrap();
         assert!(!version.is_empty());
         let row = client.query_one("select 1::int", &[]).await.unwrap();
         assert_eq!(row.get::<_, i32>(0), 1);
