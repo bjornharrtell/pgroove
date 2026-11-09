@@ -30,3 +30,8 @@ cosmic-text = { opt-level = 3 }
 swash = { opt-level = 3 }
 tree-sitter = { opt-level = 3 }
 ropey = { opt-level = 3 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

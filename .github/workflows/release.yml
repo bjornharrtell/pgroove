@@ -1,0 +1,47 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            ext: tar.gz
+          - os: macos-latest
+            name: macos-aarch64
+            ext: tar.gz
+          - os: windows-latest
+            name: windows-x86_64
+            ext: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libvulkan-dev libasound2-dev libfontconfig-dev libssl-dev
+      - run: cargo build --release -p pgroove-app
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          cp target/release/pgroove README.md dist/
+          cp packaging/pgroove.desktop dist/
+          tar -C dist -czf pgroove-${{ github.ref_name }}-${{ matrix.name }}.tar.gz .
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/pgroove.exe, README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath pgroove-${{ github.ref_name }}-${{ matrix.name }}.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: pgroove-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.ext }}

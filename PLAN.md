@@ -50,7 +50,7 @@ Key decisions:
 7. **M6 – Data editing (done; inline edit via inspector, add/delete rows, review, atomic apply, server-side read-only switch):** inline edit/insert/delete for tables with PK, pending-changes review, transaction wrap, read-only guard.
 8. **M7 – Query tooling (done: Explain/Analyze plan view, schema-aware completion, formatter):** `EXPLAIN (ANALYZE, BUFFERS)` viewer with plan tree + hot-node highlight, autocomplete (schema-aware), formatter.
 9. **M8 – Server monitoring (done: sessions with cancel/terminate, blocking, statements, databases, tables, replication, settings; auto-refresh):** `pg_stat_activity` (cancel/terminate), locks/blocking tree, `pg_stat_statements` top queries, replication, DB/table sizes, settings browser.
-10. **M9 – Polish:** command palette, keybindings config, session restore, packaging (Linux/macOS/Windows), docs.
+10. **M9 – Polish (done: command palette, keybinding config, session restore, packaging workflow, README):** command palette, keybindings config, session restore, packaging (Linux/macOS/Windows), docs.
 
 ## Later / ideas
 
