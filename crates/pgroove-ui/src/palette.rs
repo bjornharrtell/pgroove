@@ -1,5 +1,7 @@
 //! Command palette: the list of commands and how they are grouped.
 
+use pgroove_core::settings::Appearance;
+
 /// Something the palette can run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaletteCommand {
@@ -19,6 +21,9 @@ pub enum PaletteCommand {
     CheckUpdates,
     InstallUpdate,
     ToggleUpdateChecks,
+    SetAppearance(Appearance),
+    UseTheme(String),
+    ReloadThemes,
 }
 
 pub struct PaletteEntry {
@@ -52,6 +57,11 @@ pub struct PaletteContext {
     /// A newer version has been found and can be installed.
     pub update_available: bool,
     pub auto_check_updates: bool,
+    pub appearance: Appearance,
+    pub light_theme: String,
+    pub dark_theme: String,
+    /// Available themes as `(name, is_dark)`.
+    pub themes: Vec<(String, bool)>,
 }
 
 pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup> {
@@ -110,6 +120,47 @@ pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup>
         label: "Connections",
         entries: conns,
     });
+    let mark = |title: String, current: bool| {
+        if current {
+            format!("{title} (current)")
+        } else {
+            title
+        }
+    };
+    let mut look: Vec<PaletteEntry> = Appearance::ALL
+        .iter()
+        .map(|&a| {
+            entry(
+                SetAppearance(a),
+                mark(format!("Appearance: {}", a.label()), ctx.appearance == a),
+                &["theme", "light", "dark", "mode"],
+            )
+        })
+        .collect();
+    look.extend(ctx.themes.iter().map(|(name, dark)| {
+        let current = if *dark {
+            *name == ctx.dark_theme
+        } else {
+            *name == ctx.light_theme
+        };
+        entry(
+            UseTheme(name.clone()),
+            mark(
+                format!("Theme: {name} ({})", if *dark { "dark" } else { "light" }),
+                current,
+            ),
+            &["colors", "appearance"],
+        )
+    }));
+    look.push(entry(
+        ReloadThemes,
+        "Load new theme files",
+        &["custom", "themes folder"],
+    ));
+    groups.push(PaletteGroup {
+        label: "Appearance",
+        entries: look,
+    });
     let mut app = vec![entry(
         CheckUpdates,
         "Check for updates",
@@ -153,6 +204,14 @@ mod tests {
             read_only,
             update_available: update,
             auto_check_updates: auto,
+            appearance: Appearance::System,
+            light_theme: "Light One".into(),
+            dark_theme: "Dark Two".into(),
+            themes: vec![
+                ("Light One".into(), false),
+                ("Dark One".into(), true),
+                ("Dark Two".into(), true),
+            ],
         }
     }
 
@@ -163,9 +222,9 @@ mod tests {
     #[test]
     fn offline_palette_hides_server_commands() {
         let g = groups(&["a".to_string()], &ctx(false, true, false, true));
-        assert_eq!(g.len(), 4);
+        assert_eq!(g.len(), 5);
         assert_eq!(
-            titles(&g, 3),
+            titles(&g, 4),
             ["Check for updates", "Turn off automatic update checks"]
         );
         assert!(!titles(&g, 0).contains(&"Run query"));
@@ -183,12 +242,33 @@ mod tests {
         assert_eq!(titles(&g, 1)[0], "Block writes (turn on read-only)");
         assert_eq!(titles(&g, 2), ["New connection…"]);
         assert_eq!(
-            titles(&g, 3),
+            titles(&g, 4),
             [
                 "Check for updates",
                 "Install the available update",
                 "Turn on automatic update checks"
             ]
+        );
+    }
+
+    #[test]
+    fn appearance_and_themes_are_listed() {
+        let g = groups(&[], &ctx(false, true, false, true));
+        assert_eq!(g[3].label, "Appearance");
+        let t = titles(&g, 3);
+        assert_eq!(t[0], "Appearance: follow the system (current)");
+        assert_eq!(t[1], "Appearance: always light");
+        assert!(t.contains(&"Theme: Light One (light) (current)"));
+        assert!(t.contains(&"Theme: Dark One (dark)"));
+        assert!(t.contains(&"Theme: Dark Two (dark) (current)"));
+        assert_eq!(*t.last().unwrap(), "Load new theme files");
+        assert_eq!(
+            command_at(&g, 3, 3),
+            Some(PaletteCommand::UseTheme("Light One".into()))
+        );
+        assert_eq!(
+            command_at(&g, 3, 1),
+            Some(PaletteCommand::SetAppearance(Appearance::Light))
         );
     }
 

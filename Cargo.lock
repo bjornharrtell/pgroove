@@ -4964,7 +4964,6 @@ dependencies = [
  "log",
  "pgroove-core",
  "pgroove-ui",
- "serde_json",
  "tokio",
 ]
 
@@ -5010,6 +5009,7 @@ dependencies = [
  "log",
  "lsp-types",
  "pgroove-core",
+ "serde_json",
  "tokio",
 ]
 

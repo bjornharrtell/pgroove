@@ -21,7 +21,7 @@ use pgroove_core::data::TableRef;
 use pgroove_core::history::{History, Snippets};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::session::SessionState;
-use pgroove_core::settings::Settings;
+use pgroove_core::settings::{Appearance, Settings};
 use pgroove_core::update::{self, Release};
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
@@ -34,7 +34,7 @@ use crate::query_tab::{QueryTab, RowLimitChanged};
 use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
-use crate::table_view::{PageSizeChanged, TableView};
+use crate::table_view::{AllowEditing, PageSizeChanged, TableView};
 
 /// How far a session's connection has got.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -799,6 +799,12 @@ impl Workspace {
                 this.set_page_size(ev.0, cx)
             })
             .detach();
+            cx.subscribe(&view, |this, _, _: &AllowEditing, cx| {
+                if cx.global::<ReadOnlyMode>().0 {
+                    this.toggle_read_only(cx);
+                }
+            })
+            .detach();
             cx.subscribe_in(&view, window, move |this, _, ev: &OpenTable, window, cx| {
                 this.open_table(sid, ev.0.clone(), window, cx)
             })
@@ -890,6 +896,35 @@ impl Workspace {
                     self.close_session(sid, cx);
                 }
             }
+            SetAppearance(a) => {
+                self.settings.appearance = a;
+                self.save_settings();
+                crate::theme::apply(&self.settings, Some(window), cx);
+            }
+            UseTheme(name) => {
+                // Picking a theme also switches to its mode, so the choice is visible at once.
+                let dark = crate::theme::available(cx)
+                    .into_iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, dark)| dark);
+                match dark {
+                    Some(true) => {
+                        self.settings.dark_theme = name;
+                        self.settings.appearance = Appearance::Dark;
+                    }
+                    Some(false) => {
+                        self.settings.light_theme = name;
+                        self.settings.appearance = Appearance::Light;
+                    }
+                    None => return,
+                }
+                self.save_settings();
+                crate::theme::apply(&self.settings, Some(window), cx);
+            }
+            ReloadThemes => {
+                crate::theme::install(cx);
+                crate::theme::apply(&self.settings, Some(window), cx);
+            }
             CheckUpdates => self.check_updates(true, window, cx),
             InstallUpdate => self.open_update_dialog(window, cx),
             ToggleUpdateChecks => self.toggle_update_checks(cx),
@@ -910,6 +945,10 @@ impl Workspace {
                 read_only: cx.global::<ReadOnlyMode>().0,
                 update_available: matches!(self.update, UpdateState::Available(_)),
                 auto_check_updates: self.settings.check_for_updates,
+                appearance: self.settings.appearance,
+                light_theme: self.settings.light_theme.clone(),
+                dark_theme: self.settings.dark_theme.clone(),
+                themes: crate::theme::available(cx),
             },
         ));
         let state = cx.new(|cx| CommandState::new(window, cx));
@@ -1097,6 +1136,14 @@ impl Workspace {
             if let TabKind::Table(v, _) = t {
                 v.update(cx, |v, cx| v.apply_page_size(size, cx));
             }
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            log::warn!("could not save settings: {e:#}");
         }
     }
 

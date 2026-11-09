@@ -10,7 +10,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::data::{self, PageRequest, Sort, TableRef};
-use pgroove_core::edit::{self, EditSession};
+use pgroove_core::edit::{self, EditSession, RowIdentity};
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::{GridChanged, GridPane};
@@ -32,8 +32,8 @@ enum Mode {
 
 pub struct TableView {
     mode: Mode,
-    /// Primary key columns when the relation is a keyed table.
-    pk: Vec<String>,
+    /// How rows are identified for edits; `None` means the relation can't be edited.
+    identity: RowIdentity,
     notice: Option<(String, bool)>,
     structure: Option<Entity<StructureView>>,
     table: TableRef,
@@ -72,6 +72,11 @@ pub struct PageSizeChanged(pub u32);
 
 impl EventEmitter<PageSizeChanged> for TableView {}
 
+/// Emitted when the user asks to leave read-only mode so they can edit this table.
+pub struct AllowEditing;
+
+impl EventEmitter<AllowEditing> for TableView {}
+
 impl TableView {
     pub fn new(
         table: TableRef,
@@ -101,7 +106,7 @@ impl TableView {
         ];
         let mut view = Self {
             mode: Mode::Data,
-            pk: Vec::new(),
+            identity: RowIdentity::None,
             notice: None,
             structure: None,
             table,
@@ -149,9 +154,35 @@ impl TableView {
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
         if let Some((row, _)) = self.pane.read(cx).selected() {
+            self.notice = None;
             self.pane
                 .update(cx, |p, cx| p.edit_session(cx, |s| s.toggle_delete(row)));
+        } else {
+            self.notice = Some(("Select a cell in the row first.".into(), true));
+            cx.notify();
         }
+    }
+
+    /// Opens the new-row dialog filled with the selected row's values.
+    fn duplicate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, _)) = self.pane.read(cx).selected() else {
+            self.notice = Some(("Select a cell in the row first.".into(), true));
+            cx.notify();
+            return;
+        };
+        let values: Vec<Option<String>> = {
+            let grid = self.pane.read(cx).grid().read(cx);
+            let t = grid.delegate();
+            (0..t.names().len())
+                .map(|c| {
+                    t.cell(row, c)
+                        .filter(|v| !pgroove_core::query::is_clipped(v))
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+        self.notice = None;
+        self.open_add_row(Some(values), window, cx);
     }
 
     fn discard(&mut self, cx: &mut Context<Self>) {
@@ -160,7 +191,12 @@ impl TableView {
             .update(cx, |p, cx| p.edit_session(cx, EditSession::discard));
     }
 
-    fn open_add_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_add_row(
+        &mut self,
+        prefill: Option<Vec<Option<String>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let names = self
             .pane
             .read(cx)
@@ -169,9 +205,25 @@ impl TableView {
             .delegate()
             .names()
             .to_vec();
+        let title = if prefill.is_some() {
+            "Duplicate row"
+        } else {
+            "New row"
+        };
         let inputs: Vec<Entity<InputState>> = names
             .iter()
-            .map(|_| cx.new(|cx| InputState::new(window, cx).placeholder("default")))
+            .enumerate()
+            .map(|(i, _)| {
+                let initial = prefill
+                    .as_ref()
+                    .and_then(|p| p.get(i).cloned().flatten())
+                    .unwrap_or_default();
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("default")
+                        .default_value(initial)
+                })
+            })
             .collect();
         let this = cx.entity();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -183,7 +235,7 @@ impl TableView {
                     .child(Input::new(i))
             });
             dialog
-                .title("New row")
+                .title(title)
                 .w(px(420.))
                 .child(
                     v_flex()
@@ -290,7 +342,7 @@ impl TableView {
 
     fn render_edit_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
-        if self.pk.is_empty() {
+        if self.identity == RowIdentity::None {
             return None;
         }
         let read_only = cx.global::<ReadOnlyMode>().0;
@@ -305,9 +357,20 @@ impl TableView {
             .text_xs();
         if read_only {
             return Some(
-                bar.text_color(theme.muted_foreground)
-                    .child("Read-only. Turn it off in the toolbar to edit rows.")
-                    .into_any_element(),
+                bar.child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Read-only mode blocks adding, changing and deleting rows."),
+                )
+                .child(
+                    Button::new("allow-editing")
+                        .outline()
+                        .xsmall()
+                        .icon(IconName::LockOpen)
+                        .label("Allow editing")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AllowEditing))),
+                )
+                .into_any_element(),
             );
         }
         let notice = self.notice.clone().map(|(text, err)| {
@@ -319,6 +382,11 @@ impl TableView {
                 })
                 .child(text)
         });
+        let ctid_note = (self.identity == RowIdentity::Ctid).then(|| {
+            div().text_color(theme.muted_foreground).child(
+                "No primary key: rows are matched by position, and changed rows are refused.",
+            )
+        });
         Some(
             bar.child(
                 Button::new("add-row")
@@ -326,7 +394,20 @@ impl TableView {
                     .xsmall()
                     .icon(IconName::Plus)
                     .label("Add row")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_add_row(window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_add_row(None, window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("duplicate-row")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .label("Duplicate row")
+                    .tooltip("Start a new row from the selected row")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.duplicate_selected(window, cx)),
+                    ),
             )
             .child(
                 Button::new("delete-row")
@@ -334,7 +415,7 @@ impl TableView {
                     .xsmall()
                     .icon(IconName::Trash)
                     .label("Delete row")
-                    .tooltip("Select a cell first")
+                    .tooltip("Marks the selected row for deletion; select a cell in it first")
                     .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
             )
             .child(
@@ -352,6 +433,7 @@ impl TableView {
                     .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
             )
             .children(notice)
+            .children(ctid_note)
             .into_any_element(),
         )
     }
@@ -548,9 +630,12 @@ impl TableView {
         req.filter = self.applied_filter.clone();
         let (client, table) = (self.client.clone(), self.table.clone());
         let task = self.runtime.spawn(async move {
+            let identity = edit::row_identity(&client, &table)
+                .await
+                .unwrap_or(RowIdentity::None);
+            req.row_ids = identity == RowIdentity::Ctid;
             let page = data::fetch_page(&client, &table, &req).await?;
-            let pk = edit::primary_key(&client, &table).await.unwrap_or_default();
-            anyhow::Ok((page, pk))
+            anyhow::Ok((page, identity))
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -562,7 +647,7 @@ impl TableView {
                     return;
                 }
                 match result {
-                    Ok((mut page, pk)) => {
+                    Ok((mut page, identity)) => {
                         this.rows = page.data.rows.len();
                         this.notice = None;
                         this.has_more = page.has_more;
@@ -571,10 +656,19 @@ impl TableView {
                         // The grid keeps one copy of the rows; the edit session takes the
                         // original instead of a third copy, which matters for wide tables.
                         let rows = std::mem::take(&mut page.data.rows);
-                        let session = (!pk.is_empty())
-                            .then(|| EditSession::new(page.data.columns.clone(), &pk, rows).ok())
-                            .flatten();
-                        this.pk = if session.is_some() { pk } else { Vec::new() };
+                        let columns = page.data.columns.clone();
+                        let session = match &identity {
+                            RowIdentity::PrimaryKey(pk) => EditSession::new(columns, pk, rows).ok(),
+                            RowIdentity::Ctid => {
+                                EditSession::with_row_ids(columns, rows, page.row_ids).ok()
+                            }
+                            RowIdentity::None => None,
+                        };
+                        this.identity = if session.is_some() {
+                            identity
+                        } else {
+                            RowIdentity::None
+                        };
                         this.pane.update(cx, |p, cx| p.set_session(session, cx));
                         this.load = Load::Ready;
                     }
@@ -593,7 +687,7 @@ impl Render for TableView {
         let theme = cx.theme().clone();
         let page = self.page;
         let mode = self.mode;
-        let editable = !cx.global::<ReadOnlyMode>().0 && !self.pk.is_empty();
+        let editable = !cx.global::<ReadOnlyMode>().0 && self.identity != RowIdentity::None;
         self.pane.update(cx, |p, cx| p.set_editable(editable, cx));
         let mode_button = |id: &'static str, label: &'static str, which: Mode| {
             let b = Button::new(id).xsmall().label(label);

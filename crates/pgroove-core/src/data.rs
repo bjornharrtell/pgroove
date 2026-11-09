@@ -43,7 +43,14 @@ pub struct PageRequest {
     pub filter: Option<String>,
     pub limit: u64,
     pub offset: u64,
+    /// Also fetch each row's physical location (`ctid`) and version (`xmin`), for tables
+    /// without a primary key. They come back in `Page::row_ids`, not in the data.
+    pub row_ids: bool,
 }
+
+/// Names of the hidden columns used to carry row ids.
+const CTID_COLUMN: &str = "__pgroove_ctid";
+const XMIN_COLUMN: &str = "__pgroove_xmin";
 
 impl PageRequest {
     pub fn page(page: u64, size: u64) -> Self {
@@ -52,13 +59,24 @@ impl PageRequest {
             filter: None,
             limit: size,
             offset: page * size,
+            row_ids: false,
         }
     }
 }
 
 /// `select *` with the optional filter and sort, without paging.
-fn base_select(table: &TableRef, sort: Option<&Sort>, filter: Option<&str>) -> String {
-    let mut sql = format!("select * from {}", table.qualified());
+fn base_select(
+    table: &TableRef,
+    sort: Option<&Sort>,
+    filter: Option<&str>,
+    row_ids: bool,
+) -> String {
+    let extra = if row_ids {
+        format!(", ctid::text as \"{CTID_COLUMN}\", xmin::text as \"{XMIN_COLUMN}\"")
+    } else {
+        String::new()
+    };
+    let mut sql = format!("select *{extra} from {}", table.qualified());
     if let Some(f) = filter.map(str::trim).filter(|f| !f.is_empty()) {
         sql.push_str(&format!(" where {f}"));
     }
@@ -75,7 +93,7 @@ fn base_select(table: &TableRef, sort: Option<&Sort>, filter: Option<&str>) -> S
 pub fn build_select(table: &TableRef, req: &PageRequest) -> String {
     format!(
         "{} limit {} offset {}",
-        base_select(table, req.sort.as_ref(), req.filter.as_deref()),
+        base_select(table, req.sort.as_ref(), req.filter.as_deref(), req.row_ids),
         req.limit,
         req.offset
     )
@@ -83,7 +101,7 @@ pub fn build_select(table: &TableRef, req: &PageRequest) -> String {
 
 /// The query for exporting a whole table: the viewer's filter and sort, but no paging.
 pub fn build_export_select(table: &TableRef, sort: Option<&Sort>, filter: Option<&str>) -> String {
-    base_select(table, sort, filter)
+    base_select(table, sort, filter, false)
 }
 
 /// Asks the server to cancel what this connection is running (for example an export).
@@ -96,6 +114,8 @@ pub async fn cancel_running(client: &Client) -> Result<()> {
 pub struct Page {
     pub data: ResultSet,
     pub has_more: bool,
+    /// `(ctid, xmin)` per row, when requested with `PageRequest::row_ids`.
+    pub row_ids: Vec<(String, String)>,
 }
 
 /// Fetches one page, requesting one extra row to detect a following page.
@@ -109,8 +129,23 @@ pub async fn fetch_page(client: &Client, table: &TableRef, req: &PageRequest) ->
     let has_more = data.rows.len() as u64 > req.limit;
     data.rows.truncate(req.limit as usize);
     data.truncated = false;
+    let mut row_ids = Vec::new();
+    if req.row_ids {
+        // The last two columns carry the row ids; take them out of the data.
+        let keep = data.columns.len().saturating_sub(2);
+        data.columns.truncate(keep);
+        for row in &mut data.rows {
+            let xmin = row.pop().flatten().unwrap_or_default();
+            let ctid = row.pop().flatten().unwrap_or_default();
+            row_ids.push((ctid, xmin));
+        }
+    }
     data.count = data.rows.len() as u64;
-    Ok(Page { data, has_more })
+    Ok(Page {
+        data,
+        has_more,
+        row_ids,
+    })
 }
 
 #[cfg(test)]
@@ -157,6 +192,18 @@ mod tests {
             build_export_select(&t, None, None),
             "select * from \"public\".\"orders\""
         );
+    }
+
+    #[test]
+    fn select_with_row_ids() {
+        let t = TableRef::new("public", "t");
+        let mut r = PageRequest::page(0, 10);
+        r.row_ids = true;
+        assert_eq!(
+            build_select(&t, &r),
+            "select *, ctid::text as \"__pgroove_ctid\", xmin::text as \"__pgroove_xmin\" from \"public\".\"t\" limit 10 offset 0"
+        );
+        assert!(!build_export_select(&t, None, None).contains("ctid"));
     }
 
     #[tokio::test]

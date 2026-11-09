@@ -17,6 +17,3 @@ log.workspace = true
 pgroove-core.workspace = true
 pgroove-ui.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-
-[dev-dependencies]
-serde_json = "1"

@@ -13,6 +13,7 @@ mod schema_tree;
 mod sql_completion;
 mod structure_view;
 mod table_view;
+pub mod theme;
 mod title_bar;
 mod workspace;
 

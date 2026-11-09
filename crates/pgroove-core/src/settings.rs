@@ -5,6 +5,37 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Which theme variant the app shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Follow the desktop's light or dark setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "follow the system",
+            Appearance::Light => "always light",
+            Appearance::Dark => "always dark",
+        }
+    }
+}
+
+pub const DEFAULT_LIGHT_THEME: &str = "Catppuccin Latte";
+pub const DEFAULT_DARK_THEME: &str = "Catppuccin Mocha";
+
+/// Folder where users can drop their own theme files (`*.json`).
+pub fn themes_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("pgroove").join("themes"))
+}
+
 /// Rows a query returns unless the user picks another limit.
 pub const DEFAULT_ROW_LIMIT: u32 = 200;
 /// The largest limit; bigger results go through Export.
@@ -28,6 +59,22 @@ pub struct Settings {
     /// Rows per page in the data viewer.
     #[serde(default = "default_limit")]
     pub table_page_size: u32,
+    #[serde(default)]
+    pub appearance: Appearance,
+    /// Theme used when the appearance is light (or the system is light).
+    #[serde(default = "default_light")]
+    pub light_theme: String,
+    /// Theme used when the appearance is dark (or the system is dark).
+    #[serde(default = "default_dark")]
+    pub dark_theme: String,
+}
+
+fn default_light() -> String {
+    DEFAULT_LIGHT_THEME.to_string()
+}
+
+fn default_dark() -> String {
+    DEFAULT_DARK_THEME.to_string()
 }
 
 fn default_limit() -> u32 {
@@ -44,6 +91,9 @@ impl Default for Settings {
             check_for_updates: true,
             query_row_limit: DEFAULT_ROW_LIMIT,
             table_page_size: DEFAULT_ROW_LIMIT,
+            appearance: Appearance::System,
+            light_theme: default_light(),
+            dark_theme: default_dark(),
         }
     }
 }
@@ -99,6 +149,9 @@ mod tests {
             check_for_updates: false,
             query_row_limit: 1000,
             table_page_size: 500,
+            appearance: Appearance::Dark,
+            light_theme: "My Light".into(),
+            dark_theme: "Catppuccin Frappe".into(),
         };
         off.save(&path).unwrap();
         assert_eq!(Settings::load(&path), off);

@@ -12,3 +12,6 @@ log.workspace = true
 lsp-types = { version = "0.97", features = ["proposed"] }
 pgroove-core.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+serde_json = "1"

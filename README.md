@@ -17,12 +17,12 @@ Requires PostgreSQL 13 or newer on the server.
   cell inspector with pretty-printed JSON.
 - **Table structure:** columns, constraints (foreign keys are links), indexes, triggers,
   sizes and reconstructed DDL.
-- **Editing:** stage edits, inserts and deletes, review the generated SQL, apply atomically.
+- **Editing:** add, duplicate, change and delete rows in any ordinary table, including tables without a primary key (rows are then matched by physical position and version, and a row changed in the meantime is refused). Edits are staged, you review the generated SQL, and it is applied atomically.
   Writes are blocked by default through a server-side read-only session; switch it off in the
   title bar to edit.
 - **Monitoring:** sessions (cancel and terminate), blocking locks, `pg_stat_statements`,
   database and table sizes, replication, settings.
-- **Desktop integration:** follows the system light or dark theme, command palette
+- **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme switchable from the command palette, command palette
   (`Ctrl+K`), restores open tabs and window size.
 
 ## Build and run
@@ -44,6 +44,25 @@ libraries (Vulkan, Wayland or X11); make it executable and run it:
 chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
 ```
 
+## Themes
+
+The command palette (`Ctrl+K`) has an **Appearance** section: follow the system, always light, or
+always dark, and a list of themes. Picking a theme uses it for its mode and switches to that mode.
+The bundled themes are the four Catppuccin flavors (Latte; Frappé, Macchiato and Mocha).
+
+To add your own, put theme files (`*.json`, the format of the files in
+[gpui-kit's `themes` folder](https://github.com/longbridge/gpui-kit/tree/main/themes)) into the
+`themes` folder next to `settings.toml`, then run **Load new theme files** (or restart). The choice is
+stored in `settings.toml`:
+
+```toml
+appearance = "system"              # or "light" / "dark"
+light_theme = "Catppuccin Latte"
+dark_theme = "Catppuccin Mocha"
+```
+
+Edits to a theme that is already loaded need a restart; an unknown theme name falls back to the default.
+
 ## Updates
 
 pgroove checks GitHub releases a few seconds after it starts and shows an **Update to x.y.z**
@@ -63,7 +82,8 @@ by setting `check_for_updates = false` in `settings.toml`, or with the environme
 | File | Location | Purpose |
 |---|---|---|
 | `connections.toml` | config dir `pgroove/` | saved connection profiles (no passwords) |
-| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit, page size) |
+| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit, page size, theme) |
+| `themes/*.json` | config dir `pgroove/` | your own themes |
 | `snippets.toml` | config dir `pgroove/` | saved snippets |
 | `keybindings.toml` | config dir `pgroove/` | keybinding overrides |
 | `history.toml` | local data dir `pgroove/` | query history (last 500) |
