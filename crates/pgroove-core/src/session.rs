@@ -5,17 +5,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// An open table tab and the connection it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTable {
+    pub connection: String,
+    pub database: String,
+    pub schema: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
-    /// Profile name connected when the app last closed.
+    /// Open databases as `(profile name, database)`, reconnected at startup.
     #[serde(default)]
-    pub connection: Option<String>,
+    pub connections: Vec<(String, String)>,
     /// Text of each query tab, in tab order.
     #[serde(default)]
     pub queries: Vec<String>,
-    /// Open table tabs as `schema.table`, reopened after reconnecting.
+    /// Open table tabs, reopened once their database is connected.
     #[serde(default)]
-    pub tables: Vec<(String, String)>,
+    pub tables: Vec<SessionTable>,
     /// Window size in logical pixels.
     #[serde(default)]
     pub window: Option<(f32, f32)>,
@@ -64,9 +73,17 @@ mod tests {
         let path = dir.path().join("a/s.toml");
         assert_eq!(SessionState::load(&path), SessionState::default());
         let s = SessionState {
-            connection: Some("prod".into()),
+            connections: vec![
+                ("prod".into(), "shop".into()),
+                ("prod".into(), "audit".into()),
+            ],
             queries: vec!["select 1".into(), "".into()],
-            tables: vec![("public".into(), "orders".into())],
+            tables: vec![SessionTable {
+                connection: "prod".into(),
+                database: "shop".into(),
+                schema: "public".into(),
+                name: "orders".into(),
+            }],
             window: Some((1200.0, 800.0)),
         };
         s.save(&path).unwrap();

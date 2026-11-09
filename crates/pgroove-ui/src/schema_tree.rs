@@ -12,15 +12,68 @@ pub enum Load<T> {
     Failed(String),
 }
 
+/// Groups of objects shown under an expanded schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Category {
+    Tables,
+    Views,
+    Sequences,
+    Types,
+    Functions,
+}
+
+impl Category {
+    pub const ORDER: [Category; 5] = [
+        Category::Tables,
+        Category::Views,
+        Category::Sequences,
+        Category::Types,
+        Category::Functions,
+    ];
+
+    pub fn of(kind: ObjectKind) -> Self {
+        match kind {
+            ObjectKind::Table | ObjectKind::PartitionedTable | ObjectKind::ForeignTable => {
+                Category::Tables
+            }
+            ObjectKind::View | ObjectKind::MaterializedView => Category::Views,
+            ObjectKind::Sequence => Category::Sequences,
+            ObjectKind::EnumType | ObjectKind::CompositeType | ObjectKind::DomainType => {
+                Category::Types
+            }
+            ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Aggregate => {
+                Category::Functions
+            }
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Tables => "Tables",
+            Category::Views => "Views",
+            Category::Sequences => "Sequences",
+            Category::Types => "Types",
+            Category::Functions => "Functions",
+        }
+    }
+
+    /// Tables start expanded; the other groups start collapsed.
+    fn default_open(self) -> bool {
+        self == Category::Tables
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
-    Database {
-        name: String,
-        current: bool,
-    },
     Schema {
         name: String,
         expanded: bool,
+    },
+    Category {
+        schema: String,
+        category: Category,
+        expanded: bool,
+        count: usize,
     },
     Object {
         schema: String,
@@ -43,27 +96,23 @@ pub struct SchemaTree {
     schemas: Option<Load<Vec<String>>>,
     objects: HashMap<String, Load<Vec<SchemaObject>>>,
     expanded: HashSet<String>,
+    /// Groups whose state differs from their default.
+    toggled: HashSet<(String, Category)>,
     extensions: Option<Load<Vec<(String, String)>>>,
     extensions_open: bool,
-    databases: Option<Load<Vec<String>>>,
-    current_db: Option<String>,
 }
 
 impl SchemaTree {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     /// Drops loaded data but keeps what is expanded; returns the expanded schemas to refetch.
     pub fn refresh(&mut self) -> Vec<String> {
         let mut open: Vec<String> = self.expanded.iter().cloned().collect();
         open.sort();
         let keep = std::mem::take(&mut self.expanded);
+        let toggled = std::mem::take(&mut self.toggled);
         let ext_open = self.extensions_open;
-        let current = self.current_db.take();
         *self = Self::default();
-        self.current_db = current;
         self.expanded = keep;
+        self.toggled = toggled;
         self.extensions_open = ext_open;
         for name in &open {
             self.objects.insert(name.clone(), Load::Loading);
@@ -71,22 +120,23 @@ impl SchemaTree {
         open
     }
 
-    pub fn set_current_database(&mut self, name: &str) {
-        self.current_db = Some(name.to_string());
-    }
-
-    pub fn set_databases(&mut self, result: Result<Vec<String>, String>) {
-        self.databases = Some(match result {
-            Ok(v) => Load::Ready(v),
-            Err(e) => Load::Failed(e),
-        });
-    }
-
     pub fn set_extensions(&mut self, result: Result<Vec<(String, String)>, String>) {
         self.extensions = Some(match result {
             Ok(v) => Load::Ready(v),
             Err(e) => Load::Failed(e),
         });
+    }
+
+    /// Expands or collapses a group of objects under a schema.
+    pub fn toggle_category(&mut self, schema: &str, category: Category) {
+        let key = (schema.to_string(), category);
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
+    }
+
+    fn category_open(&self, schema: &str, category: Category) -> bool {
+        category.default_open() != self.toggled.contains(&(schema.to_string(), category))
     }
 
     pub fn toggle_extensions(&mut self) {
@@ -126,37 +176,8 @@ impl SchemaTree {
         false
     }
 
-    /// Databases of the server with the connected one expanded to its schemas.
+    /// Schemas (with their objects when expanded) followed by the extensions section.
     pub fn rows(&self) -> Vec<Row> {
-        let current = match &self.current_db {
-            Some(c) => c.clone(),
-            None => return self.current_rows(),
-        };
-        let others: Vec<String> = match &self.databases {
-            Some(Load::Ready(dbs)) => dbs.iter().filter(|d| **d != current).cloned().collect(),
-            _ => Vec::new(),
-        };
-        let mut names: Vec<String> = others;
-        names.push(current.clone());
-        names.sort();
-        let mut rows = Vec::new();
-        for name in names {
-            let is_current = name == current;
-            rows.push(Row::Database {
-                name,
-                current: is_current,
-            });
-            if is_current {
-                rows.extend(self.current_rows());
-            }
-        }
-        if let Some(Load::Failed(e)) = &self.databases {
-            rows.push(Row::Message(format!("Couldn't list databases: {e}")));
-        }
-        rows
-    }
-
-    fn current_rows(&self) -> Vec<Row> {
         let msg = |s: &str| vec![Row::Message(s.to_string())];
         let schemas = match &self.schemas {
             None => return Vec::new(),
@@ -178,11 +199,31 @@ impl SchemaTree {
                 Some(Load::Ready(objs)) if objs.is_empty() => {
                     rows.push(Row::Message("Empty".into()))
                 }
-                Some(Load::Ready(objs)) => rows.extend(objs.iter().map(|o| Row::Object {
-                    schema: name.clone(),
-                    name: o.name.clone(),
-                    kind: o.kind,
-                })),
+                Some(Load::Ready(objs)) => {
+                    for category in Category::ORDER {
+                        let items: Vec<&SchemaObject> = objs
+                            .iter()
+                            .filter(|o| Category::of(o.kind) == category)
+                            .collect();
+                        if items.is_empty() {
+                            continue;
+                        }
+                        let open = self.category_open(name, category);
+                        rows.push(Row::Category {
+                            schema: name.clone(),
+                            category,
+                            expanded: open,
+                            count: items.len(),
+                        });
+                        if open {
+                            rows.extend(items.into_iter().map(|o| Row::Object {
+                                schema: name.clone(),
+                                name: o.name.clone(),
+                                kind: o.kind,
+                            }));
+                        }
+                    }
+                }
                 Some(Load::Failed(e)) => rows.push(Row::Message(format!("Couldn't load: {e}"))),
                 _ => rows.push(Row::Message("Loading…".into())),
             }
@@ -237,8 +278,17 @@ mod tests {
         assert!(t.toggle("public"));
         assert_eq!(t.rows()[1], Row::Message("Loading…".into()));
         t.set_objects("public", Ok(vec![obj("a"), obj("b")]));
-        assert_eq!(t.rows().len(), 4);
-        assert!(matches!(&t.rows()[1], Row::Object { name, .. } if name == "a"));
+        assert_eq!(t.rows().len(), 5, "schema, Tables group, two tables, audit");
+        assert!(matches!(
+            &t.rows()[1],
+            Row::Category {
+                category: Category::Tables,
+                count: 2,
+                expanded: true,
+                ..
+            }
+        ));
+        assert!(matches!(&t.rows()[2], Row::Object { name, .. } if name == "a"));
 
         assert!(!t.toggle("public"));
         assert_eq!(t.rows().len(), 2);
@@ -251,54 +301,78 @@ mod tests {
         assert!(!t.toggle("audit"));
         t.set_objects("audit", Err("x".into()));
         assert!(t.rows().contains(&Row::Message("Couldn't load: x".into())));
-        t.reset();
+        t = SchemaTree::default();
         assert!(t.rows().is_empty());
     }
 
     #[test]
-    fn database_rows() {
+    fn categories_group_and_toggle() {
         let mut t = SchemaTree::default();
-        t.set_schemas(Ok(vec!["public".into()]));
-        assert!(
-            matches!(&t.rows()[0], Row::Schema { .. }),
-            "no db level before connecting"
+        t.set_schemas(Ok(vec!["s".into()]));
+        t.toggle("s");
+        let o = |name: &str, kind| SchemaObject {
+            name: name.into(),
+            kind,
+        };
+        t.set_objects(
+            "s",
+            Ok(vec![
+                o("t", ObjectKind::Table),
+                o("v", ObjectKind::View),
+                o("m", ObjectKind::MaterializedView),
+                o("q", ObjectKind::Sequence),
+                o("e", ObjectKind::EnumType),
+                o("f(a integer)", ObjectKind::Function),
+                o("p()", ObjectKind::Procedure),
+            ]),
         );
-        t.set_current_database("b");
-        assert_eq!(
-            t.rows()[0],
-            Row::Database {
-                name: "b".into(),
-                current: true
-            }
-        );
-        assert_eq!(t.rows().len(), 2);
-        t.set_databases(Ok(vec!["a".into(), "b".into(), "c".into()]));
         let rows = t.rows();
-        assert_eq!(rows.len(), 4);
+        let cats: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Category {
+                    category,
+                    count,
+                    expanded,
+                    ..
+                } => Some((*category, *count, *expanded)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            rows[0],
-            Row::Database {
-                name: "a".into(),
-                current: false
-            }
+            cats,
+            [
+                (Category::Tables, 1, true),
+                (Category::Views, 2, false),
+                (Category::Sequences, 1, false),
+                (Category::Types, 1, false),
+                (Category::Functions, 2, false),
+            ]
         );
-        assert!(matches!(&rows[2], Row::Schema { .. }));
-        assert_eq!(
-            rows[3],
-            Row::Database {
-                name: "c".into(),
-                current: false
-            }
-        );
-        t.set_databases(Err("nope".into()));
+        assert_eq!(rows.len(), 1 + 5 + 1, "only Tables lists its object");
+        t.toggle_category("s", Category::Views);
+        t.toggle_category("s", Category::Tables);
+        let rows = t.rows();
+        assert_eq!(rows.len(), 1 + 5 + 2, "Views open, Tables closed");
         assert!(
-            t.rows()
-                .iter()
-                .any(|r| matches!(r, Row::Message(m) if m.contains("list databases")))
+            rows.iter()
+                .any(|r| matches!(r, Row::Object { name, .. } if name == "m"))
         );
-        let again = t.refresh();
-        assert!(again.is_empty());
-        assert_eq!(t.rows().len(), 1, "current database survives a refresh");
+        // Groups keep their state across a refresh.
+        t.refresh();
+        t.set_schemas(Ok(vec!["s".into()]));
+        t.set_objects("s", Ok(vec![o("v", ObjectKind::View)]));
+        assert!(matches!(
+            &t.rows()[1],
+            Row::Category {
+                category: Category::Views,
+                expanded: true,
+                ..
+            }
+        ));
+        for c in Category::ORDER {
+            assert!(!c.label().is_empty());
+        }
     }
 
     #[test]

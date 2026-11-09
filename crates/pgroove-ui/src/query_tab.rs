@@ -86,6 +86,10 @@ pub struct QueryTab {
     plan: Option<Plan>,
     history: Arc<Mutex<History>>,
     snippets: Arc<Mutex<Snippets>>,
+    /// The open database this tab runs against.
+    session: Option<usize>,
+    /// Completion data of that database (the editor's provider reads it).
+    index: SharedIndex,
 }
 
 impl QueryTab {
@@ -105,8 +109,9 @@ impl QueryTab {
                 .placeholder("select now();")
         });
         editor.update(cx, |e, _| {
-            e.lsp_mut().completion_provider =
-                Some(std::rc::Rc::new(SqlCompletions { index: completions }));
+            e.lsp_mut().completion_provider = Some(std::rc::Rc::new(SqlCompletions {
+                index: completions.clone(),
+            }));
         });
         let results = cx.new(|cx| GridPane::new(false, window, cx));
         Self {
@@ -120,16 +125,34 @@ impl QueryTab {
             plan: None,
             history,
             snippets,
+            session: None,
+            index: completions,
         }
     }
 
-    pub fn set_client(
+    pub(crate) fn session(&self) -> Option<usize> {
+        self.session
+    }
+
+    /// Points the tab at an open database (or none), with its completion data.
+    pub(crate) fn bind(
         &mut self,
+        session: Option<usize>,
         client: Option<Arc<tokio_postgres::Client>>,
+        index: Option<pgroove_core::completion::Index>,
         cx: &mut Context<Self>,
     ) {
+        self.session = session;
         self.client = client;
+        self.set_index(index);
         cx.notify();
+    }
+
+    /// Replaces the completion data without changing the binding.
+    pub(crate) fn set_index(&mut self, index: Option<pgroove_core::completion::Index>) {
+        if let Ok(mut slot) = self.index.write() {
+            *slot = index;
+        }
     }
 
     pub(crate) fn text(&self, cx: &App) -> String {

@@ -6,7 +6,7 @@ use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -28,28 +28,45 @@ use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
 use crate::query_tab::QueryTab;
-use crate::schema_tree::{Row, SchemaTree};
+use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
 use crate::table_view::TableView;
 
-/// Connection lifecycle shown in the status bar.
+/// How far a session's connection has got.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Status {
-    Idle,
-    Connecting(String),
-    Connected { name: String, version: String },
+pub enum SessionStatus {
+    Connecting,
+    Ready { version: String },
     Failed(String),
 }
 
-impl Status {
-    pub fn text(&self) -> String {
+impl SessionStatus {
+    /// Status bar text for a session labelled `label`.
+    pub fn text(&self, label: &str) -> String {
         match self {
-            Status::Idle => "Not connected".into(),
-            Status::Connecting(n) => format!("Connecting to {n}…"),
-            Status::Connected { name, version } => format!("{name} · PostgreSQL {version}"),
-            Status::Failed(e) => format!("Couldn't connect: {e}"),
+            SessionStatus::Connecting => format!("Connecting to {label}…"),
+            SessionStatus::Ready { version } => format!("{label} · PostgreSQL {version}"),
+            SessionStatus::Failed(e) => format!("Couldn't connect to {label}: {e}"),
         }
+    }
+}
+
+/// One open database: its own connection, schema tree and completion data.
+struct DbSession {
+    id: usize,
+    profile: ConnectionProfile,
+    client: Option<Arc<tokio_postgres::Client>>,
+    status: SessionStatus,
+    tree: SchemaTree,
+    /// Databases of the server, as listed by this session.
+    databases: Option<Vec<String>>,
+    index: Option<pgroove_core::completion::Index>,
+}
+
+impl DbSession {
+    fn label(&self) -> String {
+        format!("{} / {}", self.profile.name, self.profile.database)
     }
 }
 
@@ -57,13 +74,25 @@ actions!(workspace, [OpenPalette]);
 
 enum SidebarItem {
     Connection(usize, ConnectionProfile),
-    Tree(usize, Row),
+    Database {
+        profile: ConnectionProfile,
+        session: Option<usize>,
+    },
+    Tree(usize, usize, Row),
+    Note(String),
 }
 
 enum TabKind {
     Query(Entity<QueryTab>, usize),
-    Activity(Entity<ActivityView>),
-    Table(Entity<TableView>),
+    Activity(Entity<ActivityView>, usize),
+    Table(Entity<TableView>, usize),
+}
+
+/// A table tab to reopen once its database is connected.
+struct PendingTable {
+    connection: String,
+    database: String,
+    table: TableRef,
 }
 
 /// Top-level window view: sidebar, main area, status bar.
@@ -71,21 +100,18 @@ pub struct Workspace {
     store: ProfileStore,
     secrets: Arc<dyn SecretStore>,
     runtime: Arc<Runtime>,
-    status: Status,
-    client: Option<Arc<tokio_postgres::Client>>,
-    tree: SchemaTree,
+    sessions: Vec<DbSession>,
+    next_session: usize,
+    /// The most recently opened session, used when no tab says which one is meant.
+    last_session: Option<usize>,
     tabs: Vec<TabKind>,
     active_tab: usize,
-    completions: SharedIndex,
     history: Arc<Mutex<History>>,
     snippets: Arc<Mutex<Snippets>>,
     next_query: usize,
-    /// The profile of the current connection, used to switch databases.
-    active_profile: Option<ConnectionProfile>,
     session_path: Option<std::path::PathBuf>,
     window_size: Option<(f32, f32)>,
-    /// Table tabs to reopen once the restored connection is up.
-    pending_tables: Vec<TableRef>,
+    pending_tables: Vec<PendingTable>,
 }
 
 impl Workspace {
@@ -98,7 +124,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let completions: SharedIndex = Default::default();
         let history = History::default_path()
             .and_then(|p| {
                 History::load(p)
@@ -129,7 +154,7 @@ impl Workspace {
                 let tab = cx.new(|cx| {
                     QueryTab::new(
                         runtime.clone(),
-                        completions.clone(),
+                        SharedIndex::default(),
                         history.clone(),
                         snippets.clone(),
                         window,
@@ -147,52 +172,91 @@ impl Workspace {
             tabs,
             active_tab: 0,
             next_query,
-            active_profile: None,
             session_path,
             window_size: None,
             pending_tables: session
                 .tables
                 .iter()
-                .map(|(s, n)| TableRef::new(s.clone(), n.clone()))
+                .map(|t| PendingTable {
+                    connection: t.connection.clone(),
+                    database: t.database.clone(),
+                    table: TableRef::new(t.schema.clone(), t.name.clone()),
+                })
                 .collect(),
-            completions,
             history,
             snippets,
             store,
             secrets,
             runtime,
-            status: Status::Idle,
-            client: None,
-            tree: SchemaTree::default(),
+            sessions: Vec::new(),
+            next_session: 1,
+            last_session: None,
         };
         cx.on_app_quit(|this, cx| {
             this.save_session(cx);
             async {}
         })
         .detach();
-        if let Some(name) = &session.connection
-            && let Some(p) = this
+        for (name, database) in &session.connections {
+            if let Some(p) = this
                 .store
                 .profiles()
                 .iter()
                 .find(|p| &p.name == name)
                 .cloned()
-        {
-            this.connect(p, cx);
+            {
+                this.open_session(
+                    ConnectionProfile {
+                        database: database.clone(),
+                        ..p
+                    },
+                    cx,
+                );
+            }
         }
         this
     }
 
-    /// Writes the restorable state (open queries and tables, connection, window size).
+    fn session(&self, id: usize) -> Option<&DbSession> {
+        self.sessions.iter().find(|s| s.id == id)
+    }
+
+    fn session_mut(&mut self, id: usize) -> Option<&mut DbSession> {
+        self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
+    fn client_of(&self, id: usize) -> Option<Arc<tokio_postgres::Client>> {
+        self.session(id).and_then(|s| s.client.clone())
+    }
+
+    fn ready_sessions(&self) -> impl Iterator<Item = &DbSession> {
+        self.sessions.iter().filter(|s| s.client.is_some())
+    }
+
+    /// The session the user is looking at: the active tab's, else the latest opened.
+    fn focused_session(&self, cx: &App) -> Option<usize> {
+        let from_tab = match self.tabs.get(self.active_tab) {
+            Some(TabKind::Query(q, _)) => q.read(cx).session(),
+            Some(TabKind::Table(_, s)) | Some(TabKind::Activity(_, s)) => Some(*s),
+            None => None,
+        };
+        from_tab
+            .filter(|id| self.session(*id).is_some())
+            .or(self.last_session.filter(|id| self.session(*id).is_some()))
+            .or_else(|| self.sessions.last().map(|s| s.id))
+    }
+
+    /// Writes the restorable state (open databases, queries, tables, window size).
     fn save_session(&self, cx: &App) {
         let Some(path) = &self.session_path else {
             return;
         };
         let state = SessionState {
-            connection: match &self.status {
-                Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
-                _ => None,
-            },
+            connections: self
+                .sessions
+                .iter()
+                .map(|s| (s.profile.name.clone(), s.profile.database.clone()))
+                .collect(),
             queries: self
                 .tabs
                 .iter()
@@ -205,9 +269,15 @@ impl Workspace {
                 .tabs
                 .iter()
                 .filter_map(|t| match t {
-                    TabKind::Table(v) => {
+                    TabKind::Table(v, sid) => {
+                        let s = self.session(*sid)?;
                         let t = v.read(cx).table();
-                        Some((t.schema.clone(), t.name.clone()))
+                        Some(pgroove_core::session::SessionTable {
+                            connection: s.profile.name.clone(),
+                            database: s.profile.database.clone(),
+                            schema: t.schema.clone(),
+                            name: t.name.clone(),
+                        })
                     }
                     _ => None,
                 })
@@ -219,17 +289,30 @@ impl Workspace {
         }
     }
 
-    fn connect(&mut self, profile: ConnectionProfile, cx: &mut Context<Self>) {
-        self.client = None;
-        self.sync_query_clients(cx);
-        self.close_table_tabs();
-        self.tree.reset();
-        if let Ok(mut s) = self.completions.write() {
-            *s = None;
+    /// Opens a database (or focuses it when already open).
+    fn open_session(&mut self, profile: ConnectionProfile, cx: &mut Context<Self>) -> usize {
+        if let Some(s) = self
+            .sessions
+            .iter()
+            .find(|s| s.profile.name == profile.name && s.profile.database == profile.database)
+        {
+            let id = s.id;
+            self.last_session = Some(id);
+            cx.notify();
+            return id;
         }
-        self.tree.set_current_database(&profile.database);
-        self.active_profile = Some(profile.clone());
-        self.status = Status::Connecting(profile.name.clone());
+        let id = self.next_session;
+        self.next_session += 1;
+        self.last_session = Some(id);
+        self.sessions.push(DbSession {
+            id,
+            profile: profile.clone(),
+            client: None,
+            status: SessionStatus::Connecting,
+            tree: SchemaTree::default(),
+            databases: None,
+            index: None,
+        });
         cx.notify();
         let secrets = self.secrets.clone();
         let read_only = cx.global::<ReadOnlyMode>().0;
@@ -237,7 +320,7 @@ impl Workspace {
             let pw = secrets.get(&profile.name)?;
             let (client, version) = connect(&profile, pw.as_deref()).await?;
             pgroove_core::edit::set_read_only(&client, read_only).await?;
-            anyhow::Ok((profile.name, client, version))
+            anyhow::Ok((client, version))
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -245,21 +328,109 @@ impl Workspace {
                 Err(e) => Err(e.into()),
             };
             this.update(cx, |this, cx| {
+                let Some(s) = this.session_mut(id) else {
+                    return; // closed while connecting
+                };
                 match result {
-                    Ok((name, client, version)) => {
-                        this.client = Some(Arc::new(client));
-                        this.sync_query_clients(cx);
+                    Ok((client, version)) => {
+                        s.client = Some(Arc::new(client));
+                        s.status = SessionStatus::Ready { version };
+                        this.bind_unbound_queries(id, cx);
                         this.save_session(cx);
-                        this.status = Status::Connected { name, version };
-                        this.load_schemas(cx);
-                        this.load_completions(cx);
-                        this.load_extensions(cx);
-                        this.load_databases(cx);
+                        this.load_schemas(id, cx);
+                        this.load_extensions(id, cx);
+                        this.load_databases(id, cx);
+                        this.load_completions(id, cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
-                        this.status = Status::Failed(format!("{e:#}"));
+                        s.status = SessionStatus::Failed(format!("{e:#}"));
                     }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        id
+    }
+
+    /// Closes one open database and the tabs that belong to it.
+    fn close_session(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.sessions.retain(|s| s.id != id);
+        self.tabs.retain(|t| match t {
+            TabKind::Table(_, s) | TabKind::Activity(_, s) => *s != id,
+            TabKind::Query(..) => true,
+        });
+        for t in &self.tabs {
+            if let TabKind::Query(q, _) = t
+                && q.read(cx).session() == Some(id)
+            {
+                q.update(cx, |q, cx| q.bind(None, None, None, cx));
+            }
+        }
+        if self.last_session == Some(id) {
+            self.last_session = None;
+        }
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Closes every open database of a connection profile.
+    fn close_profile(&mut self, name: &str, cx: &mut Context<Self>) {
+        let ids: Vec<usize> = self
+            .sessions
+            .iter()
+            .filter(|s| s.profile.name == name)
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            self.close_session(id, cx);
+        }
+    }
+
+    /// Binds query tabs that have no database yet to a newly ready one.
+    fn bind_unbound_queries(&mut self, id: usize, cx: &mut Context<Self>) {
+        let (client, index) = match self.session(id) {
+            Some(s) => (s.client.clone(), s.index.clone()),
+            None => return,
+        };
+        for t in &self.tabs {
+            if let TabKind::Query(q, _) = t
+                && q.read(cx).session().is_none()
+            {
+                q.update(cx, |q, cx| {
+                    q.bind(Some(id), client.clone(), index.clone(), cx)
+                });
+            }
+        }
+    }
+
+    /// Points a query tab at an open database.
+    fn bind_query(&mut self, tab: &Entity<QueryTab>, id: Option<usize>, cx: &mut Context<Self>) {
+        let (client, index) = id
+            .and_then(|id| self.session(id))
+            .map_or((None, None), |s| (s.client.clone(), s.index.clone()));
+        let id = id.filter(|_| client.is_some());
+        tab.update(cx, |q, cx| q.bind(id, client, index, cx));
+    }
+
+    fn load_schemas(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
+            return;
+        };
+        if let Some(s) = self.session_mut(id) {
+            s.tree.start_loading_schemas();
+        }
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::schemas(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.session_mut(id) {
+                    s.tree.set_schemas(result);
                 }
                 cx.notify();
             })
@@ -268,27 +439,8 @@ impl Workspace {
         .detach();
     }
 
-    fn load_schemas(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        self.tree.start_loading_schemas();
-        let task = self
-            .runtime
-            .spawn(async move { pgroove_core::catalog::schemas(&client).await });
-        cx.spawn(async move |this, cx| {
-            let result = flatten(task.await);
-            this.update(cx, |this, cx| {
-                this.tree.set_schemas(result);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn load_databases(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+    fn load_databases(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
             return;
         };
         let task = self
@@ -297,7 +449,11 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = flatten(task.await);
             this.update(cx, |this, cx| {
-                this.tree.set_databases(result);
+                match (this.session_mut(id), result) {
+                    (Some(s), Ok(dbs)) => s.databases = Some(dbs),
+                    (_, Err(e)) => log::warn!("could not list databases: {e}"),
+                    _ => {}
+                }
                 cx.notify();
             })
             .ok();
@@ -305,15 +461,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Reconnects the active profile to another database of the same server.
-    fn switch_database(&mut self, database: String, cx: &mut Context<Self>) {
-        if let Some(p) = self.active_profile.clone() {
-            self.connect(ConnectionProfile { database, ..p }, cx);
-        }
-    }
-
-    fn load_extensions(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+    fn load_extensions(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
             return;
         };
         let task = self
@@ -322,7 +471,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = flatten(task.await);
             this.update(cx, |this, cx| {
-                this.tree.set_extensions(result);
+                if let Some(s) = this.session_mut(id) {
+                    s.tree.set_extensions(result);
+                }
                 cx.notify();
             })
             .ok();
@@ -330,8 +481,8 @@ impl Workspace {
         .detach();
     }
 
-    fn fetch_objects(&mut self, schema: String, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+    fn fetch_objects(&mut self, id: usize, schema: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
             return;
         };
         let name = schema.clone();
@@ -341,7 +492,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = flatten(task.await);
             this.update(cx, |this, cx| {
-                this.tree.set_objects(&schema, result);
+                if let Some(s) = this.session_mut(id) {
+                    s.tree.set_objects(&schema, result);
+                }
                 cx.notify();
             })
             .ok();
@@ -349,20 +502,57 @@ impl Workspace {
         .detach();
     }
 
-    /// Reloads schemas, open schemas' objects, extensions and the completion index.
-    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        if self.client.is_none() {
+    fn load_completions(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(client) = self.client_of(id) else {
             return;
-        }
-        let open = self.tree.refresh();
-        self.load_schemas(cx);
+        };
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::completion::load(&client).await });
+        cx.spawn(async move |this, cx| match flatten(task.await) {
+            Ok(index) => {
+                this.update(cx, |this, cx| {
+                    if let Some(s) = this.session_mut(id) {
+                        s.index = Some(index.clone());
+                    }
+                    for t in &this.tabs {
+                        if let TabKind::Query(q, _) = t {
+                            q.update(cx, |q, _| {
+                                if q.session() == Some(id) {
+                                    q.set_index(Some(index.clone()));
+                                }
+                            });
+                        }
+                    }
+                })
+                .ok();
+            }
+            Err(e) => log::warn!("could not load completion index: {e}"),
+        })
+        .detach();
+    }
+
+    /// Reloads one database's schemas, open schemas' objects, extensions and completion data.
+    fn refresh_session(&mut self, id: usize, cx: &mut Context<Self>) {
+        let open = match self.session_mut(id) {
+            Some(s) if s.client.is_some() => s.tree.refresh(),
+            _ => return,
+        };
+        self.load_schemas(id, cx);
         for schema in open {
-            self.fetch_objects(schema, cx);
+            self.fetch_objects(id, schema, cx);
         }
-        self.load_extensions(cx);
-        self.load_databases(cx);
-        self.load_completions(cx);
+        self.load_extensions(id, cx);
+        self.load_databases(id, cx);
+        self.load_completions(id, cx);
         cx.notify();
+    }
+
+    fn refresh_all(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<usize> = self.ready_sessions().map(|s| s.id).collect();
+        for id in ids {
+            self.refresh_session(id, cx);
+        }
     }
 
     /// The query tab to use for inserted text: the active one, else any, else a new one.
@@ -381,14 +571,23 @@ impl Workspace {
     }
 
     fn new_query(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<QueryTab> {
-        let (runtime, completions, history, snippets) = (
+        let focused = self.focused_session(cx);
+        let (runtime, history, snippets) = (
             self.runtime.clone(),
-            self.completions.clone(),
             self.history.clone(),
             self.snippets.clone(),
         );
-        let tab = cx.new(|cx| QueryTab::new(runtime, completions, history, snippets, window, cx));
-        tab.update(cx, |t, cx| t.set_client(self.client.clone(), cx));
+        let tab = cx.new(|cx| {
+            QueryTab::new(
+                runtime,
+                SharedIndex::default(),
+                history,
+                snippets,
+                window,
+                cx,
+            )
+        });
+        self.bind_query(&tab, focused, cx);
         self.tabs.push(TabKind::Query(tab.clone(), self.next_query));
         self.next_query += 1;
         self.active_tab = self.tabs.len() - 1;
@@ -402,32 +601,29 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Gives every query tab the current connection (or none).
-    fn sync_query_clients(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        for t in &self.tabs {
-            if let TabKind::Query(q, _) = t {
-                q.update(cx, |q, cx| q.set_client(client.clone(), cx));
-            }
-        }
-    }
-
-    fn open_structure(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_table(table, window, cx);
-        if let Some(TabKind::Table(v)) = self.tabs.get(self.active_tab) {
+    fn open_structure(
+        &mut self,
+        sid: usize,
+        table: TableRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_table(sid, table, window, cx);
+        if let Some(TabKind::Table(v, _)) = self.tabs.get(self.active_tab) {
             v.update(cx, |v, cx| v.show_structure(cx));
         }
     }
 
     fn show_definition(
         &mut self,
+        sid: usize,
         schema: String,
         name: String,
         kind: ObjectKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client_of(sid) else {
             return;
         };
         let task = self.runtime.spawn(async move {
@@ -444,66 +640,55 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_schema(&mut self, schema: String, cx: &mut Context<Self>) {
-        if self.tree.toggle(&schema)
-            && let Some(client) = self.client.clone()
-        {
-            {
-                let name = schema.clone();
-                let task = self
-                    .runtime
-                    .spawn(async move { pgroove_core::catalog::objects(&client, &name).await });
-                cx.spawn(async move |this, cx| {
-                    let result = flatten(task.await);
-                    this.update(cx, |this, cx| {
-                        this.tree.set_objects(&schema, result);
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-            }
+    fn toggle_schema(&mut self, sid: usize, schema: String, cx: &mut Context<Self>) {
+        let fetch = self
+            .session_mut(sid)
+            .is_some_and(|s| s.tree.toggle(&schema));
+        if fetch {
+            self.fetch_objects(sid, schema, cx);
         }
         cx.notify();
     }
 
-    fn close_table_tabs(&mut self) {
-        self.tabs.retain(|t| matches!(t, TabKind::Query(..)));
-        self.active_tab = 0;
-    }
-
-    fn open_table(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_table(
+        &mut self,
+        sid: usize,
+        table: TableRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let existing = self.tabs.iter().position(|t| match t {
-            TabKind::Table(v) => v.read(cx).table() == &table,
-            TabKind::Query(..) | TabKind::Activity(_) => false,
+            TabKind::Table(v, s) => *s == sid && v.read(cx).table() == &table,
+            _ => false,
         });
         if let Some(ix) = existing {
             self.active_tab = ix;
-        } else if let Some(client) = self.client.clone() {
+        } else if let Some(client) = self.client_of(sid) {
             let runtime = self.runtime.clone();
             let view = cx.new(|cx| TableView::new(table, client, runtime, window, cx));
-            cx.subscribe_in(&view, window, |this, _, ev: &OpenTable, window, cx| {
-                this.open_table(ev.0.clone(), window, cx)
+            cx.subscribe_in(&view, window, move |this, _, ev: &OpenTable, window, cx| {
+                this.open_table(sid, ev.0.clone(), window, cx)
             })
             .detach();
-            self.tabs.push(TabKind::Table(view));
+            self.tabs.push(TabKind::Table(view, sid));
             self.active_tab = self.tabs.len() - 1;
         }
+        self.last_session = Some(sid);
         self.save_session(cx);
         cx.notify();
     }
 
-    fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_activity(&mut self, sid: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self
             .tabs
             .iter()
-            .position(|t| matches!(t, TabKind::Activity(_)))
+            .position(|t| matches!(t, TabKind::Activity(_, s) if *s == sid))
         {
             self.active_tab = ix;
-        } else if let Some(client) = self.client.clone() {
+        } else if let Some(client) = self.client_of(sid) {
             let runtime = self.runtime.clone();
             let view = cx.new(|cx| ActivityView::new(client, runtime, window, cx));
-            self.tabs.push(TabKind::Activity(view));
+            self.tabs.push(TabKind::Activity(view, sid));
             self.active_tab = self.tabs.len() - 1;
         }
         cx.notify();
@@ -519,25 +704,6 @@ impl Workspace {
         }
         self.save_session(cx);
         cx.notify();
-    }
-
-    fn load_completions(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let slot = self.completions.clone();
-        let task = self
-            .runtime
-            .spawn(async move { pgroove_core::completion::load(&client).await });
-        cx.spawn(async move |_, _| match flatten(task.await) {
-            Ok(index) => {
-                if let Ok(mut s) = slot.write() {
-                    *s = Some(index);
-                }
-            }
-            Err(e) => log::warn!("could not load completion index: {e}"),
-        })
-        .detach();
     }
 
     fn active_query(&self) -> Option<Entity<QueryTab>> {
@@ -568,8 +734,12 @@ impl Workspace {
                 });
             }
             ToggleReadOnly => self.toggle_read_only(cx),
-            OpenActivity => self.open_activity(window, cx),
-            RefreshTree => self.refresh_tree(cx),
+            OpenActivity => {
+                if let Some(sid) = self.focused_session(cx) {
+                    self.open_activity(sid, window, cx);
+                }
+            }
+            RefreshTree => self.refresh_all(cx),
             NewConnection => self.open_form(None, window, cx),
             Connect(name) => {
                 if let Some(p) = self
@@ -579,10 +749,14 @@ impl Workspace {
                     .find(|p| p.name == name)
                     .cloned()
                 {
-                    self.connect(p, cx);
+                    self.open_session(p, cx);
                 }
             }
-            Disconnect => self.disconnect(cx),
+            Disconnect => {
+                if let Some(sid) = self.focused_session(cx) {
+                    self.close_session(sid, cx);
+                }
+            }
         }
     }
 
@@ -595,7 +769,7 @@ impl Workspace {
             .collect();
         let groups = std::rc::Rc::new(palette::groups(
             &names,
-            self.client.is_some(),
+            self.ready_sessions().next().is_some(),
             cx.global::<ReadOnlyMode>().0,
         ));
         let state = cx.new(|cx| CommandState::new(window, cx));
@@ -643,7 +817,7 @@ impl Workspace {
     fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
         let read_only = !cx.global::<ReadOnlyMode>().0;
         cx.set_global(ReadOnlyMode(read_only));
-        if let Some(client) = self.client.clone() {
+        for client in self.ready_sessions().filter_map(|s| s.client.clone()) {
             self.runtime.spawn(async move {
                 if let Err(e) = pgroove_core::edit::set_read_only(&client, read_only).await {
                     log::warn!("could not switch read-only mode: {e:#}");
@@ -651,19 +825,6 @@ impl Workspace {
             });
         }
         cx.refresh_windows();
-    }
-
-    fn disconnect(&mut self, cx: &mut Context<Self>) {
-        self.client = None;
-        self.sync_query_clients(cx);
-        self.close_table_tabs();
-        self.tree.reset();
-        self.active_profile = None;
-        if let Ok(mut s) = self.completions.write() {
-            *s = None;
-        }
-        self.status = Status::Idle;
-        cx.notify();
     }
 
     fn save(
@@ -687,6 +848,7 @@ impl Workspace {
     }
 
     fn delete(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.close_profile(name, cx);
         if let Err(e) = self
             .store
             .remove(name)
@@ -821,41 +983,19 @@ impl Workspace {
             .overflow_hidden()
     }
 
-    fn render_tree_item(&self, i: usize, row: Row, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tree_item(
+        &self,
+        sid: usize,
+        j: usize,
+        row: Row,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Ids must stay unique across the open databases.
+        let i = sid * 1_000_000 + j;
         let muted = cx.theme().muted_foreground;
         let hover = cx.theme().sidebar_accent;
         let this = cx.entity();
         match row {
-            Row::Database { name, current } => {
-                let target = name.clone();
-                let mut row = self
-                    .tree_row(("database", i), 1, cx)
-                    .child(
-                        Icon::new(if current {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(muted),
-                    )
-                    .child(Icon::new(IconName::Database).size_4().text_color(muted))
-                    .child(div().truncate().child(name));
-                if current {
-                    row = row.font_weight(FontWeight::MEDIUM);
-                } else {
-                    row = row
-                        .cursor_pointer()
-                        .hover(move |d| d.bg(hover))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Connect to this database").build(window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.switch_database(target.clone(), cx)
-                        }));
-                }
-                row.into_any_element()
-            }
             Row::Schema { name, expanded } => {
                 let n = name.clone();
                 let (refresh_this, copy_name) = (this.clone(), name.clone());
@@ -873,18 +1013,54 @@ impl Workspace {
                     )
                     .child(Icon::new(IconName::Folder).size_4().text_color(muted))
                     .child(name)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_schema(sid, n.clone(), cx)),
+                    )
                     .context_menu(move |menu, _, _| {
                         let (t, copy) = (refresh_this.clone(), copy_name.clone());
-                        menu.item(
-                            PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
-                                t.update(cx, |ws, cx| ws.refresh_tree(cx))
-                            }),
-                        )
+                        menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
+                            t.update(cx, |ws, cx| ws.refresh_session(sid, cx))
+                        }))
                         .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         }))
                     })
+                    .into_any_element()
+            }
+            Row::Category {
+                schema,
+                category,
+                expanded,
+                count,
+            } => {
+                let icon = match category {
+                    Category::Tables => IconName::Table,
+                    Category::Views => IconName::Eye,
+                    Category::Sequences => IconName::Hash,
+                    Category::Types => IconName::Type,
+                    Category::Functions => IconName::Braces,
+                };
+                self.tree_row(("category", i), 3, cx)
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover))
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size_4()
+                        .text_color(muted),
+                    )
+                    .child(Icon::new(icon).size_4().text_color(muted))
+                    .child(category.label())
+                    .child(div().text_xs().text_color(muted).child(count.to_string()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(s) = this.session_mut(sid) {
+                            s.tree.toggle_category(&schema, category);
+                        }
+                        cx.notify();
+                    }))
                     .into_any_element()
             }
             Row::Object { schema, name, kind } => {
@@ -915,13 +1091,13 @@ impl Workspace {
                     row.cursor_pointer()
                         .hover(move |d| d.bg(hover))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_table(table.clone(), window, cx)
+                            this.open_table(sid, table.clone(), window, cx)
                         }))
                 } else if has_definition {
                     row.cursor_pointer()
                         .hover(move |d| d.bg(hover))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.show_definition(s.clone(), n.clone(), kind, window, cx)
+                            this.show_definition(sid, s.clone(), n.clone(), kind, window, cx)
                         }))
                 } else {
                     row
@@ -947,13 +1123,15 @@ impl Workspace {
                         menu = menu
                             .item(
                                 PopupMenuItem::new("Open data").on_click(move |_, window, cx| {
-                                    t1.update(cx, |ws, cx| ws.open_table(tb1.clone(), window, cx))
+                                    t1.update(cx, |ws, cx| {
+                                        ws.open_table(sid, tb1.clone(), window, cx)
+                                    })
                                 }),
                             )
                             .item(PopupMenuItem::new("Open structure").on_click(
                                 move |_, window, cx| {
                                     t2.update(cx, |ws, cx| {
-                                        ws.open_structure(tb2.clone(), window, cx)
+                                        ws.open_structure(sid, tb2.clone(), window, cx)
                                     })
                                 },
                             ))
@@ -969,7 +1147,14 @@ impl Workspace {
                         menu = menu.item(PopupMenuItem::new("Show definition").on_click(
                             move |_, window, cx| {
                                 t.update(cx, |ws, cx| {
-                                    ws.show_definition(s2.clone(), n2.clone(), kind, window, cx)
+                                    ws.show_definition(
+                                        sid,
+                                        s2.clone(),
+                                        n2.clone(),
+                                        kind,
+                                        window,
+                                        cx,
+                                    )
                                 })
                             },
                         ));
@@ -1000,8 +1185,10 @@ impl Workspace {
                 )
                 .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
                 .child(format!("Extensions ({})", count.unwrap_or(0)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.tree.toggle_extensions();
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(s) = this.session_mut(sid) {
+                        s.tree.toggle_extensions();
+                    }
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -1026,12 +1213,11 @@ impl Workspace {
 
     fn connection_row(&self, i: usize, p: ConnectionProfile, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let active = match &self.status {
-            Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
-            _ => None,
-        };
-        let is_active = active.as_deref() == Some(p.name.as_str());
-        let connected = is_active && self.client.is_some();
+        let is_active = self.sessions.iter().any(|s| s.profile.name == p.name);
+        let connected = self
+            .sessions
+            .iter()
+            .any(|s| s.profile.name == p.name && s.client.is_some());
         let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
         let hover = theme.sidebar_accent;
         self.tree_row(("conn", i), 0, cx)
@@ -1082,32 +1268,110 @@ impl Workspace {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 if is_active {
-                    this.disconnect(cx)
+                    this.close_profile(&pc.name, cx)
                 } else {
-                    this.connect(pc.clone(), cx)
+                    this.open_session(pc.clone(), cx);
                 }
             }))
             .into_any_element()
     }
 
+    fn database_row(
+        &self,
+        i: usize,
+        profile: ConnectionProfile,
+        session: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let hover = theme.sidebar_accent;
+        let open = session.is_some();
+        let name = profile.database.clone();
+        let mut row = self
+            .tree_row(("database", i), 1, cx)
+            .cursor_pointer()
+            .hover(move |d| d.bg(hover))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size_4()
+                .text_color(theme.muted_foreground),
+            )
+            .child(
+                Icon::new(IconName::Database)
+                    .size_4()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().truncate().child(name))
+            .tooltip(move |window, cx| {
+                Tooltip::new(if open {
+                    "Close this database"
+                } else {
+                    "Open this database"
+                })
+                .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| match session {
+                Some(id) => this.close_session(id, cx),
+                None => {
+                    this.open_session(profile.clone(), cx);
+                }
+            }));
+        if open {
+            row = row.font_weight(FontWeight::MEDIUM);
+        }
+        row.into_any_element()
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let active = match &self.status {
-            Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
-            _ => None,
-        };
         let mut items: Vec<SidebarItem> = Vec::new();
         for (i, p) in self.store.profiles().iter().cloned().enumerate() {
-            let is_active = active.as_deref() == Some(p.name.as_str());
-            items.push(SidebarItem::Connection(i, p));
-            if is_active {
-                items.extend(
-                    self.tree
-                        .rows()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(j, r)| SidebarItem::Tree(j, r)),
-                );
+            let open: Vec<&DbSession> = self
+                .sessions
+                .iter()
+                .filter(|s| s.profile.name == p.name)
+                .collect();
+            items.push(SidebarItem::Connection(i, p.clone()));
+            if open.is_empty() {
+                continue;
+            }
+            let mut names: std::collections::BTreeSet<String> =
+                open.iter().map(|s| s.profile.database.clone()).collect();
+            for s in &open {
+                if let Some(dbs) = &s.databases {
+                    names.extend(dbs.iter().cloned());
+                }
+            }
+            for name in names {
+                let session = open.iter().find(|s| s.profile.database == name);
+                items.push(SidebarItem::Database {
+                    profile: ConnectionProfile {
+                        database: name.clone(),
+                        ..p.clone()
+                    },
+                    session: session.map(|s| s.id),
+                });
+                if let Some(s) = session {
+                    match &s.status {
+                        SessionStatus::Connecting => {
+                            items.push(SidebarItem::Note("Connecting…".into()))
+                        }
+                        SessionStatus::Failed(e) => {
+                            items.push(SidebarItem::Note(format!("Couldn't connect: {e}")))
+                        }
+                        SessionStatus::Ready { .. } => items.extend(
+                            s.tree
+                                .rows()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(j, r)| SidebarItem::Tree(s.id, j, r)),
+                        ),
+                    }
+                }
             }
         }
         let empty = items.is_empty();
@@ -1120,7 +1384,22 @@ impl Workspace {
                 range
                     .map(|ix| match &items[ix] {
                         SidebarItem::Connection(i, p) => this.connection_row(*i, p.clone(), cx),
-                        SidebarItem::Tree(j, r) => this.render_tree_item(*j, r.clone(), cx),
+                        SidebarItem::Database { profile, session } => {
+                            this.database_row(ix, profile.clone(), *session, cx)
+                        }
+                        SidebarItem::Tree(sid, j, r) => {
+                            this.render_tree_item(*sid, *j, r.clone(), cx)
+                        }
+                        SidebarItem::Note(m) => div()
+                            .pl(px(66.))
+                            .h(px(26.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(m.clone())
+                            .into_any_element(),
                     })
                     .collect::<Vec<_>>()
             }),
@@ -1164,7 +1443,7 @@ impl Workspace {
                                     .xsmall()
                                     .icon(IconName::RefreshCw)
                                     .tooltip("Refresh schema tree")
-                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
+                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_all(cx))),
                             )
                             .child(
                                 Button::new("add")
@@ -1198,18 +1477,22 @@ impl Workspace {
                 "Editing is allowed. Click to block writes."
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_read_only(cx)));
+        let focused = self.focused_session(cx).and_then(|id| self.session(id));
         let theme = cx.theme();
-        let (label, color) = match &self.status {
-            Status::Connected { name, .. } => (
-                match &self.active_profile {
-                    Some(p) => format!("{name} / {}", p.database),
-                    None => name.clone(),
-                },
-                theme.success,
-            ),
-            Status::Connecting(n) => (format!("{n}…"), theme.muted_foreground),
-            Status::Failed(_) => ("Connection failed".into(), theme.danger),
-            Status::Idle => ("No connection".into(), theme.muted_foreground),
+        let (label, color) = match focused {
+            Some(s) => {
+                let mut label = s.label();
+                if self.sessions.len() > 1 {
+                    label.push_str(&format!(" +{}", self.sessions.len() - 1));
+                }
+                let color = match s.status {
+                    SessionStatus::Ready { .. } => theme.success,
+                    SessionStatus::Connecting => theme.muted_foreground,
+                    SessionStatus::Failed(_) => theme.danger,
+                };
+                (label, color)
+            }
+            None => ("No connection".to_string(), theme.muted_foreground),
         };
         crate::title_bar::title_bar(
             h_flex()
@@ -1243,9 +1526,11 @@ impl Workspace {
                         .icon(IconName::Activity)
                         .label("Activity")
                         .tooltip("Sessions, locks, statements and more")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_activity(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(sid) = this.focused_session(cx) {
+                                this.open_activity(sid, window, cx);
+                            }
+                        })),
                 )
                 .child(div().flex_1())
                 .child(
@@ -1259,6 +1544,64 @@ impl Workspace {
             window,
             cx,
         )
+    }
+
+    /// A tab title, with the database appended when several are open.
+    fn tab_label(&self, title: &str, sid: usize) -> String {
+        match self.session(sid) {
+            Some(s) if self.sessions.len() > 1 => format!("{title} · {}", s.profile.database),
+            _ => title.to_string(),
+        }
+    }
+
+    /// The database picker above a query tab.
+    fn render_query_session_bar(
+        &self,
+        q: &Entity<QueryTab>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let label = q
+            .read(cx)
+            .session()
+            .and_then(|id| self.session(id))
+            .map_or_else(|| "No database".to_string(), DbSession::label);
+        let choices: Vec<(usize, String)> =
+            self.ready_sessions().map(|s| (s.id, s.label())).collect();
+        let (this, tab) = (cx.entity(), q.clone());
+        h_flex()
+            .px_3()
+            .h(px(28.))
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Database"),
+            )
+            .child(
+                Button::new("query-database")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Database)
+                    .label(label)
+                    .tooltip("Choose which open database this query runs against")
+                    .dropdown_menu(move |menu, _, _| {
+                        if choices.is_empty() {
+                            return menu
+                                .item(PopupMenuItem::new("No open databases").disabled(true));
+                        }
+                        choices.iter().fold(menu, |m, (id, label)| {
+                            let (t, tab, id) = (this.clone(), tab.clone(), *id);
+                            m.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| {
+                                t.update(cx, |ws, cx| ws.bind_query(&tab, Some(id), cx))
+                            }))
+                        })
+                    }),
+            )
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1284,8 +1627,8 @@ impl Workspace {
                                 this.close_tab(ix, cx)
                             })),
                     ),
-                TabKind::Activity(_) => Tab::new()
-                    .label("Activity")
+                TabKind::Activity(_, sid) => Tab::new()
+                    .label(self.tab_label("Activity", *sid))
                     .prefix(div().px_1().child(Icon::new(IconName::Activity).size_4()))
                     .suffix(
                         Button::new(("close", ix))
@@ -1297,8 +1640,8 @@ impl Workspace {
                                 this.close_tab(ix, cx)
                             })),
                     ),
-                TabKind::Table(v) => Tab::new()
-                    .label(v.read(cx).table().name.clone())
+                TabKind::Table(v, sid) => Tab::new()
+                    .label(self.tab_label(&v.read(cx).table().name, *sid))
                     .prefix(div().px_1().child(Icon::new(IconName::Table).size_4()))
                     .suffix(
                         Button::new(("close", ix))
@@ -1326,12 +1669,20 @@ impl Workspace {
 
     fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.tabs.get(self.active_tab) {
-            Some(TabKind::Table(v)) => div().flex_1().min_h_0().child(v.clone()).into_any_element(),
-            Some(TabKind::Activity(v)) => {
+            Some(TabKind::Table(v, _)) => {
+                div().flex_1().min_h_0().child(v.clone()).into_any_element()
+            }
+            Some(TabKind::Activity(v, _)) => {
                 div().flex_1().min_h_0().child(v.clone()).into_any_element()
             }
             Some(TabKind::Query(q, _)) => {
-                div().flex_1().min_h_0().child(q.clone()).into_any_element()
+                let q = q.clone();
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_query_session_bar(&q, cx))
+                    .child(div().flex_1().min_h_0().child(q))
+                    .into_any_element()
             }
             None => div()
                 .flex_1()
@@ -1368,17 +1719,34 @@ impl Render for Workspace {
         let radii = window_corner_radii(window, cx);
         let size = window.bounds().size;
         self.window_size = Some((f32::from(size.width), f32::from(size.height)));
-        if self.client.is_some() && !self.pending_tables.is_empty() {
-            for t in std::mem::take(&mut self.pending_tables) {
-                self.open_table(t, window, cx);
-            }
+        let ready: Vec<(usize, usize)> = self
+            .pending_tables
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, p)| {
+                self.sessions
+                    .iter()
+                    .find(|s| {
+                        s.client.is_some()
+                            && s.profile.name == p.connection
+                            && s.profile.database == p.database
+                    })
+                    .map(|s| (ix, s.id))
+            })
+            .collect();
+        for (ix, sid) in ready.into_iter().rev() {
+            let p = self.pending_tables.remove(ix);
+            self.open_table(sid, p.table, window, cx);
         }
-        let (left, right) = match &self.status {
-            Status::Connected { name, version } => (
-                format!("PostgreSQL {version}"),
-                format!("Connected · {name}"),
-            ),
-            s => (String::new(), s.text()),
+        let (left, right) = match self.focused_session(cx).and_then(|id| self.session(id)) {
+            Some(s) => match &s.status {
+                SessionStatus::Ready { version } => (
+                    format!("PostgreSQL {version}"),
+                    format!("Connected · {}", s.label()),
+                ),
+                other => (String::new(), other.text(&s.label())),
+            },
+            None => (String::new(), "Not connected".to_string()),
         };
         v_flex()
             .size_full()
@@ -1412,17 +1780,21 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::Status;
+    use super::SessionStatus;
 
     #[test]
     fn status_text() {
-        assert_eq!(Status::Idle.text(), "Not connected");
-        assert_eq!(Status::Connecting("a".into()).text(), "Connecting to a…");
-        let c = Status::Connected {
-            name: "a".into(),
+        assert_eq!(
+            SessionStatus::Connecting.text("a / b"),
+            "Connecting to a / b…"
+        );
+        let r = SessionStatus::Ready {
             version: "16.3".into(),
         };
-        assert_eq!(c.text(), "a · PostgreSQL 16.3");
-        assert_eq!(Status::Failed("x".into()).text(), "Couldn't connect: x");
+        assert_eq!(r.text("a / b"), "a / b · PostgreSQL 16.3");
+        assert_eq!(
+            SessionStatus::Failed("x".into()).text("a / b"),
+            "Couldn't connect to a / b: x"
+        );
     }
 }

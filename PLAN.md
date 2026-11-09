@@ -69,7 +69,6 @@ All milestones M0–M9 are implemented.
 
 ## Known limitations
 
-- One connection per window; opening another replaces it.
 - JSON export writes every value as a string (the text protocol carries no column types).
 - A new row can't be given an explicit NULL; empty and NULL both mean "use the default".
 - Results are buffered in memory, capped at 10,000 rows per statement.
@@ -79,4 +78,5 @@ All milestones M0–M9 are implemented.
 
 ## Open questions
 
-- Several simultaneous connections per window?
+None.
+
