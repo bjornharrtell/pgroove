@@ -20,6 +20,9 @@ pub struct ConnectionForm {
     ssl: Entity<SslMode>,
 }
 
+/// Callback for the dialog's Test connection button.
+pub type TestHandler = Rc<dyn Fn(FormValues, &mut Window, &mut App)>;
+
 /// Raw form values.
 pub struct FormValues {
     pub profile: ConnectionProfile,
@@ -106,11 +109,7 @@ impl ConnectionForm {
         }
     }
 
-    pub fn render(
-        &self,
-        cx: &App,
-        on_test: Rc<dyn Fn(FormValues, &mut Window, &mut App)>,
-    ) -> impl IntoElement {
+    pub fn render(&self, cx: &App, on_test: TestHandler) -> impl IntoElement {
         let row = |label: &'static str, input: &Entity<InputState>| {
             v_flex()
                 .gap_1()
