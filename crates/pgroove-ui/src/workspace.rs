@@ -18,6 +18,7 @@ use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
+use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
 use crate::grid_pane::GridPane;
 use crate::mode::ReadOnlyMode;
@@ -64,6 +65,7 @@ enum BottomTab {
 
 enum TabKind {
     Query,
+    Activity(Entity<ActivityView>),
     Table(Entity<TableView>),
 }
 
@@ -219,7 +221,7 @@ impl Workspace {
     fn open_table(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
         let existing = self.tabs.iter().position(|t| match t {
             TabKind::Table(v) => v.read(cx).table() == &table,
-            TabKind::Query => false,
+            TabKind::Query | TabKind::Activity(_) => false,
         });
         if let Some(ix) = existing {
             self.active_tab = ix;
@@ -231,6 +233,22 @@ impl Workspace {
             })
             .detach();
             self.tabs.push(TabKind::Table(view));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, TabKind::Activity(_)))
+        {
+            self.active_tab = ix;
+        } else if let Some(client) = self.client.clone() {
+            let runtime = self.runtime.clone();
+            let view = cx.new(|cx| ActivityView::new(client, runtime, window, cx));
+            self.tabs.push(TabKind::Activity(view));
             self.active_tab = self.tabs.len() - 1;
         }
         cx.notify();
@@ -752,6 +770,15 @@ impl Workspace {
                     .child(label),
             )
             .child(mode_chip)
+            .child(
+                Button::new("activity")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Activity)
+                    .label("Activity")
+                    .tooltip("Sessions, locks, statements and more")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_activity(window, cx))),
+            )
             .child(div().flex_1())
             .child(
                 Button::new("palette")
@@ -861,6 +888,19 @@ impl Workspace {
                 TabKind::Query => Tab::new()
                     .label("Query 1")
                     .prefix(Icon::new(IconName::Code).size_4()),
+                TabKind::Activity(_) => Tab::new()
+                    .label("Activity")
+                    .prefix(Icon::new(IconName::Activity).size_4())
+                    .suffix(
+                        Button::new(("close", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, cx)
+                            })),
+                    ),
                 TabKind::Table(v) => Tab::new()
                     .label(v.read(cx).table().name.clone())
                     .prefix(Icon::new(IconName::Table).size_4())
@@ -882,6 +922,9 @@ impl Workspace {
     fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.tabs.get(self.active_tab) {
             Some(TabKind::Table(v)) => div().flex_1().min_h_0().child(v.clone()).into_any_element(),
+            Some(TabKind::Activity(v)) => {
+                div().flex_1().min_h_0().child(v.clone()).into_any_element()
+            }
             _ => self.render_query_tab(cx).into_any_element(),
         };
         v_flex()

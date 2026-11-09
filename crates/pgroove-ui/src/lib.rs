@@ -1,5 +1,6 @@
 //! gpui views built on gpui-kit.
 
+mod activity_view;
 mod connections;
 mod grid_pane;
 mod mode;
