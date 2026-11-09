@@ -8,6 +8,7 @@ pub mod edit;
 pub mod explain;
 pub mod export;
 pub mod format;
+pub mod history;
 pub mod monitor;
 pub mod profile;
 pub mod query;

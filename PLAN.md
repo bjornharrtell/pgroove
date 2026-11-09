@@ -44,7 +44,7 @@ Key decisions:
 1. **M0 – Skeleton (done):** workspace, window, theming from gpui-kit, logging, CI (fmt, clippy, test).
 2. **M1 – Connections (done: TLS modes, URI import, test connection):** connection form (host/port/db/user/SSL/URI), test connection, keychain storage, connect/disconnect, saved list.
 3. **M2 – Schema browser (done):** lazy tree for schemas/tables/views/matviews/sequences/functions/types/extensions; context menus; refresh.
-4. **M3 – SQL editor (editor, run, cancel, results grid done; tabs, history, snippets, error position pending):** multi-tab editor, syntax highlight, run selection/all, cancel, multi-statement results, timing, error position, history, saved snippets.
+4. **M3 – SQL editor (done: multiple tabs, history, snippets, error highlighting):** multi-tab editor, syntax highlight, run selection/all, cancel, multi-statement results, timing, error position, history, saved snippets.
 5. **M4 – Data viewer (done):** virtualized grid, sort/filter/paginate, copy/export (CSV/JSON), cell inspector (json, bytea, long text).
 6. **M5 – Table structure (done; size shown as table/index/total, DDL reconstructed):** columns, indexes, constraints, FKs (navigable), triggers, DDL view, size/stats.
 7. **M6 – Data editing (done; inline edit via inspector, add/delete rows, review, atomic apply, server-side read-only switch):** inline edit/insert/delete for tables with PK, pending-changes review, transaction wrap, read-only guard.

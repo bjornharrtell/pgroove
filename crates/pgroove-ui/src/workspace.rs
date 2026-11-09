@@ -1,9 +1,8 @@
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
@@ -15,18 +14,17 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
 use pgroove_core::data::TableRef;
-use pgroove_core::explain::Plan;
-use pgroove_core::query::{self, QueryOutput};
+use pgroove_core::history::{History, Snippets};
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
 use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
-use crate::grid_pane::GridPane;
 use crate::mode::ReadOnlyMode;
+use crate::query_tab::QueryTab;
 use crate::schema_tree::{Row, SchemaTree};
-use crate::sql_completion::{SharedIndex, SqlCompletions};
+use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
 use crate::table_view::TableView;
 
@@ -50,24 +48,8 @@ impl Status {
     }
 }
 
-actions!(workspace, [RunQuery, CancelQuery, FormatSql]);
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum RunState {
-    Idle,
-    Running,
-    Failed(String),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BottomTab {
-    Results,
-    Messages,
-    Plan,
-}
-
 enum TabKind {
-    Query,
+    Query(Entity<QueryTab>, usize),
     Activity(Entity<ActivityView>),
     Table(Entity<TableView>),
 }
@@ -80,15 +62,12 @@ pub struct Workspace {
     status: Status,
     client: Option<Arc<tokio_postgres::Client>>,
     tree: SchemaTree,
-    editor: Entity<EditorState>,
-    results: Entity<GridPane>,
-    run: RunState,
-    output: Option<QueryOutput>,
-    bottom: BottomTab,
     tabs: Vec<TabKind>,
     active_tab: usize,
-    plan: Option<Plan>,
     completions: SharedIndex,
+    history: Arc<Mutex<History>>,
+    snippets: Arc<Mutex<Snippets>>,
+    next_query: usize,
 }
 
 impl Workspace {
@@ -99,30 +78,42 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("sql".to_string())
-                .line_number(true)
-                .soft_wrap(false)
-                .placeholder("select now();")
-        });
-        let results = cx.new(|cx| GridPane::new(false, window, cx));
         let completions: SharedIndex = Default::default();
-        editor.update(cx, |e, _| {
-            e.lsp_mut().completion_provider = Some(std::rc::Rc::new(SqlCompletions {
-                index: completions.clone(),
-            }));
+        let history = History::default_path()
+            .and_then(|p| {
+                History::load(p)
+                    .map_err(|e| log::warn!("history unavailable: {e:#}"))
+                    .ok()
+            })
+            .unwrap_or_else(History::in_memory);
+        let snippets = Snippets::default_path()
+            .and_then(|p| {
+                Snippets::load(p)
+                    .map_err(|e| log::warn!("snippets unavailable: {e:#}"))
+                    .ok()
+            })
+            .unwrap_or_else(Snippets::in_memory);
+        let (history, snippets) = (
+            Arc::new(Mutex::new(history)),
+            Arc::new(Mutex::new(snippets)),
+        );
+        let first = cx.new(|cx| {
+            QueryTab::new(
+                runtime.clone(),
+                completions.clone(),
+                history.clone(),
+                snippets.clone(),
+                window,
+                cx,
+            )
         });
         Self {
-            editor,
-            results,
-            run: RunState::Idle,
-            output: None,
-            bottom: BottomTab::Results,
-            tabs: vec![TabKind::Query],
+            tabs: vec![TabKind::Query(first, 1)],
             active_tab: 0,
-            plan: None,
+            next_query: 2,
             completions,
+            history,
+            snippets,
             store,
             secrets,
             runtime,
@@ -134,6 +125,7 @@ impl Workspace {
 
     fn connect(&mut self, profile: ConnectionProfile, cx: &mut Context<Self>) {
         self.client = None;
+        self.sync_query_clients(cx);
         self.close_table_tabs();
         self.tree.reset();
         if let Ok(mut s) = self.completions.write() {
@@ -158,6 +150,7 @@ impl Workspace {
                 match result {
                     Ok((name, client, version)) => {
                         this.client = Some(Arc::new(client));
+                        this.sync_query_clients(cx);
                         this.status = Status::Connected { name, version };
                         this.load_schemas(cx);
                         this.load_completions(cx);
@@ -246,21 +239,51 @@ impl Workspace {
         cx.notify();
     }
 
-    fn append_to_editor(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.editor.read(cx).value().to_string();
-        let joined = if current.trim().is_empty() {
-            text.to_string()
-        } else {
-            format!("{}\n\n{}", current.trim_end(), text)
-        };
-        self.editor
-            .update(cx, |e, cx| e.set_value(joined, window, cx));
-        self.active_tab = self
-            .tabs
-            .iter()
-            .position(|t| matches!(t, TabKind::Query))
-            .unwrap_or(0);
+    /// The query tab to use for inserted text: the active one, else any, else a new one.
+    fn query_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<QueryTab> {
+        if let Some(TabKind::Query(q, _)) = self.tabs.get(self.active_tab) {
+            return q.clone();
+        }
+        if let Some((ix, q)) = self.tabs.iter().enumerate().find_map(|(i, t)| match t {
+            TabKind::Query(q, _) => Some((i, q.clone())),
+            _ => None,
+        }) {
+            self.active_tab = ix;
+            return q;
+        }
+        self.new_query(window, cx)
+    }
+
+    fn new_query(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<QueryTab> {
+        let (runtime, completions, history, snippets) = (
+            self.runtime.clone(),
+            self.completions.clone(),
+            self.history.clone(),
+            self.snippets.clone(),
+        );
+        let tab = cx.new(|cx| QueryTab::new(runtime, completions, history, snippets, window, cx));
+        tab.update(cx, |t, cx| t.set_client(self.client.clone(), cx));
+        self.tabs.push(TabKind::Query(tab.clone(), self.next_query));
+        self.next_query += 1;
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
+        tab
+    }
+
+    fn append_to_editor(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.query_tab(window, cx);
+        tab.update(cx, |t, cx| t.append(text, window, cx));
+        cx.notify();
+    }
+
+    /// Gives every query tab the current connection (or none).
+    fn sync_query_clients(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        for t in &self.tabs {
+            if let TabKind::Query(q, _) = t {
+                q.update(cx, |q, cx| q.set_client(client.clone(), cx));
+            }
+        }
     }
 
     fn open_structure(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
@@ -319,14 +342,14 @@ impl Workspace {
     }
 
     fn close_table_tabs(&mut self) {
-        self.tabs.retain(|t| matches!(t, TabKind::Query));
+        self.tabs.retain(|t| matches!(t, TabKind::Query(..)));
         self.active_tab = 0;
     }
 
     fn open_table(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
         let existing = self.tabs.iter().position(|t| match t {
             TabKind::Table(v) => v.read(cx).table() == &table,
-            TabKind::Query | TabKind::Activity(_) => false,
+            TabKind::Query(..) | TabKind::Activity(_) => false,
         });
         if let Some(ix) = existing {
             self.active_tab = ix;
@@ -360,7 +383,7 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix == 0 || ix >= self.tabs.len() {
+        if ix >= self.tabs.len() {
             return;
         }
         self.tabs.remove(ix);
@@ -368,130 +391,6 @@ impl Workspace {
             self.active_tab = self.active_tab.saturating_sub(1);
         }
         cx.notify();
-    }
-
-    fn run_query(&mut self, cx: &mut Context<Self>) {
-        if self.run == RunState::Running {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            self.run = RunState::Failed("Connect to a database first.".into());
-            self.bottom = BottomTab::Messages;
-            cx.notify();
-            return;
-        };
-        let editor = self.editor.read(cx);
-        let selected = editor.selected_text().to_string();
-        let sql = if selected.trim().is_empty() {
-            editor.value().to_string()
-        } else {
-            selected
-        };
-        if sql.trim().is_empty() {
-            return;
-        }
-        self.run = RunState::Running;
-        cx.notify();
-        let task = self
-            .runtime
-            .spawn(async move { query::run(&client, &sql, query::MAX_ROWS).await });
-        cx.spawn(async move |this, cx| {
-            let result = flatten(task.await);
-            this.update(cx, |this, cx| {
-                this.finish_query(result, cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn finish_query(&mut self, result: Result<QueryOutput, String>, cx: &mut Context<Self>) {
-        match result {
-            Ok(out) => {
-                self.run = RunState::Idle;
-                let set = out.last_rowset().cloned();
-                self.bottom = if set.is_some() {
-                    BottomTab::Results
-                } else {
-                    BottomTab::Messages
-                };
-                self.results
-                    .update(cx, |p, cx| p.set_data(set.as_ref(), cx));
-                self.output = Some(out);
-            }
-            Err(e) => {
-                self.run = RunState::Failed(e);
-                self.bottom = BottomTab::Messages;
-            }
-        }
-        cx.notify();
-    }
-
-    fn cancel_query(&mut self, cx: &mut Context<Self>) {
-        if self.run != RunState::Running {
-            return;
-        }
-        if let Some(client) = self.client.clone() {
-            self.runtime.spawn(async move {
-                if let Err(e) = query::cancel(&client).await {
-                    log::warn!("cancel failed: {e:#}");
-                }
-            });
-        }
-        cx.notify();
-    }
-
-    fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.editor.read(cx).value().to_string();
-        if text.trim().is_empty() {
-            return;
-        }
-        let formatted = pgroove_core::format::format_sql(&text);
-        self.editor
-            .update(cx, |e, cx| e.set_value(formatted, window, cx));
-    }
-
-    fn explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
-        if self.run == RunState::Running {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            self.run = RunState::Failed("Connect to a database first.".into());
-            self.bottom = BottomTab::Messages;
-            cx.notify();
-            return;
-        };
-        let editor = self.editor.read(cx);
-        let selected = editor.selected_text().to_string();
-        let sql = if selected.trim().is_empty() {
-            editor.value().to_string()
-        } else {
-            selected
-        };
-        self.run = RunState::Running;
-        cx.notify();
-        let task = self
-            .runtime
-            .spawn(async move { pgroove_core::explain::run(&client, &sql, analyze).await });
-        cx.spawn(async move |this, cx| {
-            let result = flatten(task.await);
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(plan) => {
-                        this.run = RunState::Idle;
-                        this.plan = Some(plan);
-                        this.bottom = BottomTab::Plan;
-                    }
-                    Err(e) => {
-                        this.run = RunState::Failed(e);
-                        this.bottom = BottomTab::Messages;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn load_completions(&mut self, cx: &mut Context<Self>) {
@@ -528,6 +427,7 @@ impl Workspace {
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
+        self.sync_query_clients(cx);
         self.close_table_tabs();
         self.tree.reset();
         if let Ok(mut s) = self.completions.write() {
@@ -1078,92 +978,6 @@ impl Workspace {
         )
     }
 
-    fn render_results_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let tab = |id: &'static str, label: &'static str, which: BottomTab| {
-            let on = self.bottom == which;
-            div()
-                .id(id)
-                .cursor_pointer()
-                .text_color(if on {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                })
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.bottom = which;
-                    cx.notify();
-                }))
-        };
-        let summary = match (&self.run, &self.output) {
-            (RunState::Running, _) => "Running…".to_string(),
-            (_, Some(o)) => {
-                let n = o.last_rowset().map(|s| s.count).unwrap_or(0);
-                format!("{n} rows · {} ms", o.elapsed.as_millis())
-            }
-            _ => String::new(),
-        };
-        h_flex()
-            .gap_4()
-            .px_3()
-            .h(px(34.))
-            .items_center()
-            .text_xs()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(tab("tab-results", "Results", BottomTab::Results))
-            .child(tab("tab-messages", "Messages", BottomTab::Messages))
-            .child(tab("tab-plan", "Plan", BottomTab::Plan))
-            .child(div().flex_1())
-            .child(div().text_color(theme.muted_foreground).child(summary))
-            .child(self.results.read(cx).actions())
-    }
-
-    fn render_results_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let note = |text: String, color: Hsla| {
-            div()
-                .flex_1()
-                .p_3()
-                .text_sm()
-                .text_color(color)
-                .child(text)
-                .into_any_element()
-        };
-        if self.bottom == BottomTab::Plan {
-            return crate::plan_view::render(self.plan.as_ref(), &theme);
-        }
-        if self.bottom == BottomTab::Messages {
-            if let RunState::Failed(e) = &self.run {
-                return note(e.clone(), theme.danger);
-            }
-            let text = self
-                .output
-                .as_ref()
-                .map(|o| o.messages().join("\n"))
-                .unwrap_or_else(|| "No messages.".into());
-            return note(text, theme.foreground);
-        }
-        if self.output.as_ref().and_then(|o| o.last_rowset()).is_some() {
-            div()
-                .flex_1()
-                .min_h_0()
-                .child(self.results.clone())
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("Run a query to see results.")
-                .into_any_element()
-        }
-    }
-
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = TabBar::new("tabs")
             .underline()
@@ -1174,9 +988,19 @@ impl Workspace {
             }));
         for (ix, kind) in self.tabs.iter().enumerate() {
             bar = bar.child(match kind {
-                TabKind::Query => Tab::new()
-                    .label("Query 1")
-                    .prefix(Icon::new(IconName::Code).size_4()),
+                TabKind::Query(_, n) => Tab::new()
+                    .label(format!("Query {n}"))
+                    .prefix(Icon::new(IconName::Code).size_4())
+                    .suffix(
+                        Button::new(("close", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, cx)
+                            })),
+                    ),
                 TabKind::Activity(_) => Tab::new()
                     .label("Activity")
                     .prefix(Icon::new(IconName::Activity).size_4())
@@ -1205,7 +1029,16 @@ impl Workspace {
                     ),
             });
         }
-        bar
+        bar.suffix(
+            Button::new("new-query")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("New query tab")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_query(window, cx);
+                })),
+        )
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1214,7 +1047,18 @@ impl Workspace {
             Some(TabKind::Activity(v)) => {
                 div().flex_1().min_h_0().child(v.clone()).into_any_element()
             }
-            _ => self.render_query_tab(cx).into_any_element(),
+            Some(TabKind::Query(q, _)) => {
+                div().flex_1().min_h_0().child(q.clone()).into_any_element()
+            }
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No tabs open. Use + to start a new query.")
+                .into_any_element(),
         };
         v_flex()
             .flex_1()
@@ -1223,87 +1067,11 @@ impl Workspace {
             .child(self.render_tab_bar(cx))
             .child(content)
     }
-
-    fn render_query_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let strip = || {
-            h_flex()
-                .gap_2()
-                .px_3()
-                .h(px(34.))
-                .items_center()
-                .border_b_1()
-                .border_color(theme.border)
-        };
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(
-                strip()
-                    .child(
-                        Button::new("run")
-                            .outline()
-                            .xsmall()
-                            .icon(IconName::Play)
-                            .label("Run · Ctrl+Enter")
-                            .loading(self.run == RunState::Running)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_query(cx))),
-                    )
-                    .child(
-                        Button::new("explain")
-                            .outline()
-                            .xsmall()
-                            .label("Explain")
-                            .tooltip("Estimated plan; does not run the statement")
-                            .on_click(cx.listener(|this, _, _, cx| this.explain(false, cx))),
-                    )
-                    .child(
-                        Button::new("analyze")
-                            .outline()
-                            .xsmall()
-                            .label("Analyze")
-                            .tooltip("Runs the statement in a transaction that is rolled back")
-                            .on_click(cx.listener(|this, _, _, cx| this.explain(true, cx))),
-                    )
-                    .child(
-                        Button::new("format")
-                            .ghost()
-                            .xsmall()
-                            .label("Format")
-                            .tooltip("Format SQL (Ctrl+Shift+F)")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.format_sql(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("cancel")
-                            .ghost()
-                            .xsmall()
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(170.))
-                    .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        Editor::new(&self.editor)
-                            .bordered(false)
-                            .p_0()
-                            .h_full()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(theme.mono_font_size),
-                    ),
-            )
-            .child(self.render_results_header(cx))
-            .child(self.render_results_body(cx))
-    }
 }
 
-fn flatten<T>(r: Result<anyhow::Result<T>, tokio::task::JoinError>) -> Result<T, String> {
+pub(crate) fn flatten<T>(
+    r: Result<anyhow::Result<T>, tokio::task::JoinError>,
+) -> Result<T, String> {
     match r {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(format!("{e:#}")),
@@ -1325,9 +1093,6 @@ impl Render for Workspace {
         v_flex()
             .size_full()
             .key_context("Workspace")
-            .on_action(cx.listener(|this, _: &RunQuery, _, cx| this.run_query(cx)))
-            .on_action(cx.listener(|this, _: &CancelQuery, _, cx| this.cancel_query(cx)))
-            .on_action(cx.listener(|this, _: &FormatSql, window, cx| this.format_sql(window, cx)))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(cx))

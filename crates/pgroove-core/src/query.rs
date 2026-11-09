@@ -88,6 +88,47 @@ pub fn collect(messages: Vec<SimpleQueryMessage>, max_rows: usize) -> Vec<Result
     sets
 }
 
+/// A failed statement, keeping the server's error position for the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryError {
+    pub message: String,
+    /// 1-based character position within the executed SQL.
+    pub position: Option<usize>,
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QueryError {}
+
+impl QueryError {
+    pub fn from_driver(e: &tokio_postgres::Error) -> Self {
+        let position = e.as_db_error().and_then(|d| match d.position() {
+            Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p as usize),
+            _ => None,
+        });
+        Self {
+            message: describe_error(e),
+            position,
+        }
+    }
+
+    /// Byte range of the offending token in `sql`, for highlighting.
+    pub fn span_in(&self, sql: &str) -> Option<std::ops::Range<usize>> {
+        let start = sql.char_indices().nth(self.position?.checked_sub(1)?)?.0;
+        let rest = &sql[start..];
+        let len = rest
+            .char_indices()
+            .find(|(i, c)| *i > 0 && !(c.is_alphanumeric() || *c == '_'))
+            .map_or(rest.len(), |(i, _)| i)
+            .max(rest.chars().next().map_or(0, char::len_utf8));
+        Some(start..start + len)
+    }
+}
+
 /// Human-readable error text including server detail, hint and position.
 pub fn describe_error(e: &tokio_postgres::Error) -> String {
     match e.as_db_error() {
@@ -116,7 +157,7 @@ pub async fn run(client: &Client, sql: &str, max_rows: usize) -> Result<QueryOut
     let messages = client
         .simple_query(sql)
         .await
-        .map_err(|e| anyhow::Error::msg(describe_error(&e)))?;
+        .map_err(|e| anyhow::Error::new(QueryError::from_driver(&e)))?;
     Ok(QueryOutput {
         sets: collect(messages, max_rows),
         elapsed: start.elapsed(),
@@ -174,6 +215,54 @@ mod tests {
     }
 
     #[test]
+    fn error_span() {
+        let e = QueryError {
+            message: "m".into(),
+            position: Some(8),
+        };
+        assert_eq!(e.span_in("select foo_bar from t"), Some(7..14));
+        let at_end = QueryError {
+            position: Some(6),
+            ..e.clone()
+        };
+        assert_eq!(at_end.span_in("select"), Some(5..6));
+        let multi = QueryError {
+            position: Some(3),
+            ..e.clone()
+        };
+        assert_eq!(
+            multi.span_in("åäö x"),
+            Some(4..6),
+            "positions count characters"
+        );
+        assert_eq!(
+            QueryError {
+                position: None,
+                ..e.clone()
+            }
+            .span_in("x"),
+            None
+        );
+        assert_eq!(
+            QueryError {
+                position: Some(99),
+                ..e.clone()
+            }
+            .span_in("x"),
+            None
+        );
+        assert_eq!(
+            QueryError {
+                position: Some(0),
+                ..e.clone()
+            }
+            .span_in("x"),
+            None
+        );
+        assert_eq!(e.to_string(), "m");
+    }
+
+    #[test]
     fn collect_empty() {
         assert!(collect(vec![], 10).is_empty());
         assert!(collect(vec![SimpleQueryMessage::CommandComplete(2)], 10)[0].count == 2);
@@ -198,6 +287,9 @@ mod tests {
         assert_eq!((last.rows.len(), last.count, last.truncated), (3, 5, true));
         let err = run(&client, "select * from nope", 3).await.unwrap_err();
         assert!(err.to_string().contains("nope"), "{err}");
+        let qe = err.downcast_ref::<QueryError>().expect("structured error");
+        assert_eq!(qe.position, Some(15));
+        assert_eq!(qe.span_in("select * from nope"), Some(14..18));
         client.simple_query("select 1").await.unwrap();
         cancel(&client).await.unwrap();
     }
