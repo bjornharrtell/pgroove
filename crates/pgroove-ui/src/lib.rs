@@ -4,6 +4,7 @@ mod connections;
 mod grid_pane;
 mod results;
 mod schema_tree;
+mod structure_view;
 mod table_view;
 mod workspace;
 

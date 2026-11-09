@@ -8,6 +8,7 @@ pub mod profile;
 pub mod query;
 pub mod secrets;
 pub mod store;
+pub mod structure;
 
 pub use profile::ConnectionProfile;
 pub use store::ProfileStore;

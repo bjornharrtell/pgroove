@@ -11,6 +11,7 @@ use pgroove_core::data::{self, PageRequest, Sort, TableRef};
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::GridPane;
+use crate::structure_view::{OpenTable, StructureView};
 
 pub const PAGE_SIZE: u64 = 200;
 
@@ -20,7 +21,15 @@ enum Load {
     Failed(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Data,
+    Structure,
+}
+
 pub struct TableView {
+    mode: Mode,
+    structure: Option<Entity<StructureView>>,
     table: TableRef,
     client: Arc<tokio_postgres::Client>,
     runtime: Arc<Runtime>,
@@ -45,6 +54,8 @@ pub fn range_label(page: u64, rows: usize) -> String {
     let first = page * PAGE_SIZE + 1;
     format!("{}–{}", first, first + rows as u64 - 1)
 }
+
+impl EventEmitter<OpenTable> for TableView {}
 
 impl TableView {
     pub fn new(
@@ -72,6 +83,8 @@ impl TableView {
             }),
         ];
         let mut view = Self {
+            mode: Mode::Data,
+            structure: None,
             table,
             client,
             runtime,
@@ -88,6 +101,24 @@ impl TableView {
         };
         view.reload(cx);
         view
+    }
+
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        if mode == Mode::Structure && self.structure.is_none() {
+            let (table, client, runtime) = (
+                self.table.clone(),
+                self.client.clone(),
+                self.runtime.clone(),
+            );
+            let view = cx.new(|cx| StructureView::new(table, client, runtime, cx));
+            self._subs
+                .push(cx.subscribe(&view, |_, _, ev: &OpenTable, cx| {
+                    cx.emit(OpenTable(ev.0.clone()))
+                }));
+            self.structure = Some(view);
+        }
+        cx.notify();
     }
 
     pub fn table(&self) -> &TableRef {
@@ -168,6 +199,48 @@ impl Render for TableView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let page = self.page;
+        let mode = self.mode;
+        let mode_button = |id: &'static str, label: &'static str, which: Mode| {
+            let b = Button::new(id).xsmall().label(label);
+            let b = if mode == which {
+                b.outline()
+            } else {
+                b.ghost()
+            };
+            b.on_click(cx.listener(move |this, _, _, cx| this.set_mode(which, cx)))
+        };
+        let mode_bar = h_flex()
+            .gap_1()
+            .px_3()
+            .h(px(32.))
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(mode_button("mode-data", "Data", Mode::Data))
+            .child(mode_button("mode-structure", "Structure", Mode::Structure))
+            .child(div().flex_1())
+            .child(
+                Button::new("reload")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Reload")
+                    .on_click(
+                        cx.listener(|this, _, _, cx| match (this.mode, &this.structure) {
+                            (Mode::Structure, Some(s)) => s.update(cx, |s, cx| s.reload(cx)),
+                            _ => this.reload(cx),
+                        }),
+                    ),
+            );
+        if mode == Mode::Structure
+            && let Some(s) = &self.structure
+        {
+            return v_flex()
+                .size_full()
+                .child(mode_bar)
+                .child(div().flex_1().min_h_0().child(s.clone()))
+                .into_any_element();
+        }
         let body = match &self.load {
             Load::Failed(e) => div()
                 .p_3()
@@ -187,6 +260,7 @@ impl Render for TableView {
         };
         v_flex()
             .size_full()
+            .child(mode_bar)
             .child(
                 h_flex()
                     .gap_2()
@@ -197,14 +271,6 @@ impl Render for TableView {
                     .border_color(theme.border)
                     .child(div().flex_1().child(Input::new(&self.filter)))
                     .child(self.pane.read(cx).actions())
-                    .child(
-                        Button::new("reload")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::RefreshCw)
-                            .tooltip("Reload")
-                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                    )
                     .child(
                         Button::new("prev")
                             .ghost()
@@ -239,6 +305,7 @@ impl Render for TableView {
                     ),
             )
             .child(body)
+            .into_any_element()
     }
 }
 

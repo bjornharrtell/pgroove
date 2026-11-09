@@ -20,6 +20,7 @@ use tokio::runtime::Runtime;
 use crate::connections::ConnectionForm;
 use crate::grid_pane::GridPane;
 use crate::schema_tree::{Row, SchemaTree};
+use crate::structure_view::OpenTable;
 use crate::table_view::TableView;
 
 /// Connection lifecycle shown in the status bar.
@@ -205,6 +206,10 @@ impl Workspace {
         } else if let Some(client) = self.client.clone() {
             let runtime = self.runtime.clone();
             let view = cx.new(|cx| TableView::new(table, client, runtime, window, cx));
+            cx.subscribe_in(&view, window, |this, _, ev: &OpenTable, window, cx| {
+                this.open_table(ev.0.clone(), window, cx)
+            })
+            .detach();
             self.tabs.push(TabKind::Table(view));
             self.active_tab = self.tabs.len() - 1;
         }
