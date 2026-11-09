@@ -17,7 +17,11 @@ cp "$root/packaging/pgroove.png" "$appdir/pgroove.png"
 cp "$root/packaging/pgroove.svg" "$appdir/pgroove.svg"
 # AppStream metadata, so software centers can describe the app.
 mkdir -p "$appdir/usr/share/metainfo"
-cp "$root/packaging/pgroove.appdata.xml" "$appdir/usr/share/metainfo/pgroove.appdata.xml"
+# The file name must match the component id, and the launchable desktop file must be installed.
+cp "$root/packaging/pgroove.appdata.xml" \
+  "$appdir/usr/share/metainfo/io.github.bjornharrtell.pgroove.appdata.xml"
+mkdir -p "$appdir/usr/share/applications"
+cp "$root/packaging/pgroove.desktop" "$appdir/usr/share/applications/pgroove.desktop"
 cat > "$appdir/AppRun" <<'RUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
