@@ -8,6 +8,7 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
+use gpui_kit::component::{TitleBar, window_corner_radii};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
@@ -742,51 +743,51 @@ impl Workspace {
             Status::Failed(_) => ("Connection failed".into(), theme.danger),
             Status::Idle => ("No connection".into(), theme.muted_foreground),
         };
-        h_flex()
-            .h(px(40.))
-            .px_3()
-            .gap_3()
-            .items_center()
-            .bg(theme.title_bar)
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("pgroove"),
-            )
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .px_2()
-                    .h(px(26.))
-                    .items_center()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_sm()
-                    .child(Icon::new(IconName::Circle).size_3().text_color(color))
-                    .child(label),
-            )
-            .child(mode_chip)
-            .child(
-                Button::new("activity")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Activity)
-                    .label("Activity")
-                    .tooltip("Sessions, locks, statements and more")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_activity(window, cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("palette")
-                    .outline()
-                    .small()
-                    .icon(IconName::Search)
-                    .label("Command palette · Ctrl+K"),
-            )
+        TitleBar::new().child(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .items_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("pgroove"),
+                )
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .px_2()
+                        .h(px(26.))
+                        .items_center()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .child(Icon::new(IconName::Circle).size_3().text_color(color))
+                        .child(label),
+                )
+                .child(mode_chip)
+                .child(
+                    Button::new("activity")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Activity)
+                        .label("Activity")
+                        .tooltip("Sessions, locks, statements and more")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_activity(window, cx)),
+                        ),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new("palette")
+                        .outline()
+                        .small()
+                        .icon(IconName::Search)
+                        .label("Command palette · Ctrl+K"),
+                ),
+        )
     }
 
     fn render_results_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1023,8 +1024,9 @@ fn flatten<T>(r: Result<anyhow::Result<T>, tokio::task::JoinError>) -> Result<T,
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let radii = window_corner_radii(window, cx);
         let (left, right) = match &self.status {
             Status::Connected { name, version } => (
                 format!("PostgreSQL {version}"),
@@ -1050,6 +1052,8 @@ impl Render for Workspace {
             )
             .child(
                 StatusBar::new()
+                    .rounded_bl(radii.bottom_left)
+                    .rounded_br(radii.bottom_right)
                     .left(div().text_xs().child(left))
                     .right(div().text_xs().child(right)),
             )
