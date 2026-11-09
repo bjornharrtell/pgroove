@@ -5,4 +5,14 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = "1"
+dirs = "6"
+keyring = "3"
 log.workspace = true
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
+tokio-postgres = "0.7"
+toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"

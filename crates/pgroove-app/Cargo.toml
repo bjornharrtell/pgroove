@@ -9,7 +9,10 @@ name = "pgroove"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit.workspace = true
-pgroove-ui = { path = "../pgroove-ui" }
-log.workspace = true
+anyhow = "1"
 env_logger.workspace = true
+gpui-kit.workspace = true
+log.workspace = true
+pgroove-core = { path = "../pgroove-core" }
+pgroove-ui = { path = "../pgroove-ui" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
