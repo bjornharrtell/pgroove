@@ -4,6 +4,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -160,6 +161,7 @@ impl Workspace {
                         this.status = Status::Connected { name, version };
                         this.load_schemas(cx);
                         this.load_completions(cx);
+                        this.load_extensions(cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
@@ -186,6 +188,107 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.tree.set_schemas(result);
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_extensions(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::extensions(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                this.tree.set_extensions(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fetch_objects(&mut self, schema: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let name = schema.clone();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::objects(&client, &name).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                this.tree.set_objects(&schema, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reloads schemas, open schemas' objects, extensions and the completion index.
+    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        let open = self.tree.refresh();
+        self.load_schemas(cx);
+        for schema in open {
+            self.fetch_objects(schema, cx);
+        }
+        self.load_extensions(cx);
+        self.load_completions(cx);
+        cx.notify();
+    }
+
+    fn append_to_editor(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.editor.read(cx).value().to_string();
+        let joined = if current.trim().is_empty() {
+            text.to_string()
+        } else {
+            format!("{}\n\n{}", current.trim_end(), text)
+        };
+        self.editor
+            .update(cx, |e, cx| e.set_value(joined, window, cx));
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, TabKind::Query))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    fn open_structure(&mut self, table: TableRef, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_table(table, window, cx);
+        if let Some(TabKind::Table(v)) = self.tabs.get(self.active_tab) {
+            v.update(cx, |v, cx| v.show_structure(cx));
+        }
+    }
+
+    fn show_definition(
+        &mut self,
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let task = self.runtime.spawn(async move {
+            pgroove_core::catalog::definition(&client, &schema, &name, kind).await
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = flatten(task.await);
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(text) => this.append_to_editor(&text, window, cx),
+                Err(e) => window.push_notification(Notification::error(e), cx),
             })
             .ok();
         })
@@ -591,6 +694,7 @@ impl Workspace {
     fn render_tree_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let muted = cx.theme().muted_foreground;
         let hover = cx.theme().sidebar_accent;
+        let this = cx.entity();
         self.tree
             .rows()
             .into_iter()
@@ -598,6 +702,7 @@ impl Workspace {
             .map(|(i, row)| match row {
                 Row::Schema { name, expanded } => {
                     let n = name.clone();
+                    let (refresh_this, copy_name) = (this.clone(), name.clone());
                     self.tree_row(("schema", i), 1, cx)
                         .cursor_pointer()
                         .hover(move |d| d.bg(hover))
@@ -615,29 +720,146 @@ impl Workspace {
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)),
                         )
+                        .context_menu(move |menu, _, _| {
+                            let (t, copy) = (refresh_this.clone(), copy_name.clone());
+                            menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
+                                t.update(cx, |ws, cx| ws.refresh_tree(cx))
+                            }))
+                            .item(
+                                PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                                }),
+                            )
+                        })
                         .into_any_element()
                 }
-                Row::Object { schema, name, kind } => self
-                    .tree_row(("object", i), 3, cx)
-                    .when(kind != ObjectKind::Sequence, |d| {
+                Row::Object { schema, name, kind } => {
+                    let icon = match kind {
+                        ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
+                        ObjectKind::Sequence => IconName::Hash,
+                        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Aggregate => {
+                            IconName::Braces
+                        }
+                        ObjectKind::EnumType
+                        | ObjectKind::CompositeType
+                        | ObjectKind::DomainType => IconName::Type,
+                        _ => IconName::Table,
+                    };
+                    let has_definition = matches!(
+                        kind,
+                        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::EnumType
+                    );
+                    let (s, n) = (schema.clone(), name.clone());
+                    let ctx_this = this.clone();
+                    let row = self
+                        .tree_row(("object", i), 3, cx)
+                        .child(Icon::new(icon).size_4().text_color(muted))
+                        .child(name.clone())
+                        .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
+                    let row = if kind.is_relation() {
                         let table = TableRef::new(schema.clone(), name.clone());
-                        d.cursor_pointer()
+                        row.cursor_pointer()
                             .hover(move |d| d.bg(hover))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_table(table.clone(), window, cx)
                             }))
+                    } else if has_definition {
+                        row.cursor_pointer()
+                            .hover(move |d| d.bg(hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.show_definition(s.clone(), n.clone(), kind, window, cx)
+                            }))
+                    } else {
+                        row
+                    };
+                    let (s, n) = (schema.clone(), name.clone());
+                    row.context_menu(move |menu, _, _| {
+                        let qualified = format!(
+                            "{}.{}",
+                            pgroove_core::data::quote_ident(&s),
+                            pgroove_core::data::quote_ident(&n)
+                        );
+                        let table = TableRef::new(s.clone(), n.clone());
+                        let mut menu = menu;
+                        if kind.is_relation() {
+                            let (t1, t2, t3, tb1, tb2, q) = (
+                                ctx_this.clone(),
+                                ctx_this.clone(),
+                                ctx_this.clone(),
+                                table.clone(),
+                                table.clone(),
+                                qualified.clone(),
+                            );
+                            menu = menu
+                                .item(PopupMenuItem::new("Open data").on_click(
+                                    move |_, window, cx| {
+                                        t1.update(cx, |ws, cx| {
+                                            ws.open_table(tb1.clone(), window, cx)
+                                        })
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Open structure").on_click(
+                                    move |_, window, cx| {
+                                        t2.update(cx, |ws, cx| {
+                                            ws.open_structure(tb2.clone(), window, cx)
+                                        })
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Select first 100 rows").on_click(
+                                    move |_, window, cx| {
+                                        let sql = format!("select * from {q} limit 100;");
+                                        t3.update(cx, |ws, cx| {
+                                            ws.append_to_editor(&sql, window, cx)
+                                        })
+                                    },
+                                ));
+                        }
+                        if has_definition {
+                            let (t, s2, n2) = (ctx_this.clone(), s.clone(), n.clone());
+                            menu = menu.item(PopupMenuItem::new("Show definition").on_click(
+                                move |_, window, cx| {
+                                    t.update(cx, |ws, cx| {
+                                        ws.show_definition(s2.clone(), n2.clone(), kind, window, cx)
+                                    })
+                                },
+                            ));
+                        }
+                        let copy = if kind.is_relation() {
+                            qualified
+                        } else {
+                            n.clone()
+                        };
+                        menu.item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                        }))
                     })
+                    .into_any_element()
+                }
+                Row::ExtensionsHeader { expanded, count } => self
+                    .tree_row(("extensions", i), 1, cx)
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover))
                     .child(
-                        Icon::new(match kind {
-                            ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
-                            ObjectKind::Sequence => IconName::Hash,
-                            _ => IconName::Table,
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
                         })
                         .size_4()
                         .text_color(muted),
                     )
+                    .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
+                    .child(format!("Extensions ({})", count.unwrap_or(0)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tree.toggle_extensions();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                Row::Extension { name, version } => self
+                    .tree_row(("extension", i), 3, cx)
+                    .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
                     .child(name)
-                    .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx))
+                    .child(div().text_xs().text_color(muted).child(version))
                     .into_any_element(),
                 Row::Message(m) => div()
                     .pl(px(52.))
@@ -754,13 +976,25 @@ impl Workspace {
                             .child("Connections"),
                     )
                     .child(
-                        Button::new("add")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip("New connection")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                Button::new("refresh-tree")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::RefreshCw)
+                                    .tooltip("Refresh schema tree")
+                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
+                            )
+                            .child(
+                                Button::new("add")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Plus)
+                                    .tooltip("New connection")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_form(None, window, cx)
+                                    })),
                             ),
                     ),
             )

@@ -111,6 +111,11 @@ impl TableView {
         view
     }
 
+    /// Switches the tab to the Structure view.
+    pub fn show_structure(&mut self, cx: &mut Context<Self>) {
+        self.set_mode(Mode::Structure, cx);
+    }
+
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.mode = mode;
         if mode == Mode::Structure && self.structure.is_none() {
