@@ -3,14 +3,17 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use pgroove_core::catalog::ObjectKind;
 use pgroove_core::secrets::SecretStore;
 use pgroove_core::{ConnectionProfile, ProfileStore, connect::connect};
 use tokio::runtime::Runtime;
 
 use crate::connections::ConnectionForm;
+use crate::schema_tree::{Row, SchemaTree};
 
 /// Connection lifecycle shown in the status bar.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -39,6 +42,7 @@ pub struct Workspace {
     runtime: Arc<Runtime>,
     status: Status,
     client: Option<Arc<tokio_postgres::Client>>,
+    tree: SchemaTree,
 }
 
 impl Workspace {
@@ -49,11 +53,13 @@ impl Workspace {
             runtime,
             status: Status::Idle,
             client: None,
+            tree: SchemaTree::default(),
         }
     }
 
     fn connect(&mut self, profile: ConnectionProfile, cx: &mut Context<Self>) {
         self.client = None;
+        self.tree.reset();
         self.status = Status::Connecting(profile.name.clone());
         cx.notify();
         let secrets = self.secrets.clone();
@@ -72,6 +78,7 @@ impl Workspace {
                     Ok((name, client, version)) => {
                         this.client = Some(Arc::new(client));
                         this.status = Status::Connected { name, version };
+                        this.load_schemas(cx);
                     }
                     Err(e) => {
                         log::warn!("connect failed: {e:#}");
@@ -85,8 +92,51 @@ impl Workspace {
         .detach();
     }
 
+    fn load_schemas(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.tree.start_loading_schemas();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::catalog::schemas(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = flatten(task.await);
+            this.update(cx, |this, cx| {
+                this.tree.set_schemas(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn toggle_schema(&mut self, schema: String, cx: &mut Context<Self>) {
+        if self.tree.toggle(&schema)
+            && let Some(client) = self.client.clone()
+        {
+            {
+                let name = schema.clone();
+                let task = self
+                    .runtime
+                    .spawn(async move { pgroove_core::catalog::objects(&client, &name).await });
+                cx.spawn(async move |this, cx| {
+                    let result = flatten(task.await);
+                    this.update(cx, |this, cx| {
+                        this.tree.set_objects(&schema, result);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
+        self.tree.reset();
         self.status = Status::Idle;
         cx.notify();
     }
@@ -172,6 +222,69 @@ impl Workspace {
                     }
                 })
         });
+    }
+
+    fn render_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self
+            .tree
+            .rows()
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| match row {
+                Row::Schema { name, expanded } => {
+                    let n = name.clone();
+                    h_flex()
+                        .id(("schema", i))
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .items_center()
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(cx.theme().accent))
+                        .child(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .child(IconName::Folder)
+                        .child(name)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)),
+                        )
+                        .into_any_element()
+                }
+                Row::Object { name, kind, .. } => h_flex()
+                    .id(("object", i))
+                    .gap_1()
+                    .pl_8()
+                    .pr_2()
+                    .py_0p5()
+                    .items_center()
+                    .text_sm()
+                    .child(match kind {
+                        ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
+                        ObjectKind::Sequence => IconName::Hash,
+                        _ => IconName::Table,
+                    })
+                    .child(name)
+                    .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx))
+                    .into_any_element(),
+                Row::Message(m) => div()
+                    .pl_8()
+                    .py_0p5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(m)
+                    .into_any_element(),
+            });
+        v_flex()
+            .id("schema-tree")
+            .flex_1()
+            .overflow_y_scroll()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .children(rows)
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -264,6 +377,15 @@ impl Workspace {
                     ),
             )
             .children(rows)
+            .child(self.render_tree(cx))
+    }
+}
+
+fn flatten<T>(r: Result<anyhow::Result<T>, tokio::task::JoinError>) -> Result<T, String> {
+    match r {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(e) => Err(e.to_string()),
     }
 }
 

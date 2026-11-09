@@ -94,5 +94,33 @@ mod tests {
         assert!(!version.is_empty());
         let row = client.query_one("select 1::int", &[]).await.unwrap();
         assert_eq!(row.get::<_, i32>(0), 1);
+
+        client
+            .batch_execute(
+                "create schema if not exists pgroove_t; \
+                 create table if not exists pgroove_t.a (id int); \
+                 create or replace view pgroove_t.v as select 1 as x",
+            )
+            .await
+            .unwrap();
+        assert!(
+            crate::catalog::schemas(&client)
+                .await
+                .unwrap()
+                .contains(&"pgroove_t".to_string())
+        );
+        let objs = crate::catalog::objects(&client, "pgroove_t").await.unwrap();
+        let names: Vec<_> = objs.iter().map(|o| (o.name.as_str(), o.kind)).collect();
+        assert_eq!(
+            names,
+            [
+                ("a", crate::catalog::ObjectKind::Table),
+                ("v", crate::catalog::ObjectKind::View)
+            ]
+        );
+        client
+            .batch_execute("drop schema pgroove_t cascade")
+            .await
+            .unwrap();
     }
 }

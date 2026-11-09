@@ -41,9 +41,9 @@ Key decisions:
 
 ## Milestones
 
-1. **M0 – Skeleton:** workspace, window, theming from gpui-kit, logging, CI (fmt, clippy, test).
-2. **M1 – Connections:** connection form (host/port/db/user/SSL/URI), test connection, keychain storage, connect/disconnect, saved list.
-3. **M2 – Schema browser:** lazy tree for schemas/tables/views/matviews/sequences/functions/types/extensions; context menus; refresh.
+1. **M0 – Skeleton (done):** workspace, window, theming from gpui-kit, logging, CI (fmt, clippy, test).
+2. **M1 – Connections (done; TLS, URI import, test button pending):** connection form (host/port/db/user/SSL/URI), test connection, keychain storage, connect/disconnect, saved list.
+3. **M2 – Schema browser (schemas/relations done; functions/types/extensions, context menus, refresh pending):** lazy tree for schemas/tables/views/matviews/sequences/functions/types/extensions; context menus; refresh.
 4. **M3 – SQL editor:** multi-tab editor, syntax highlight, run selection/all, cancel, multi-statement results, timing, error position, history, saved snippets.
 5. **M4 – Data viewer:** virtualized grid, sort/filter/paginate, copy/export (CSV/JSON), cell inspector (json, bytea, long text).
 6. **M5 – Table structure:** columns, indexes, constraints, FKs (navigable), triggers, DDL view, size/stats.

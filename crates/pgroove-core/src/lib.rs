@@ -1,5 +1,6 @@
 //! UI-independent logic: connections, catalog, query execution.
 
+pub mod catalog;
 pub mod connect;
 pub mod profile;
 pub mod secrets;
