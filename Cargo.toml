@@ -11,3 +11,22 @@ publish = false
 gpui-kit = { version = "0.9.0", features = ["tree-sitter-sql"] }
 log = "0.4"
 env_logger = "0.11"
+
+# Optimise heavy dependencies in dev builds; unoptimised GPUI layout and text
+# code runs several times slower (measured ~3 fps vs ~22 fps on a text-heavy view).
+[profile.dev.package]
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smol = { opt-level = 3 }
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-pre-sum-tree = { opt-level = 3 }
+gpui-pre-wgpu = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+swash = { opt-level = 3 }
+tree-sitter = { opt-level = 3 }
+ropey = { opt-level = 3 }
