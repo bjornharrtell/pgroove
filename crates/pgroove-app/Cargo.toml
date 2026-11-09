@@ -1,0 +1,15 @@
+[package]
+name = "pgroove-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pgroove"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+pgroove-ui = { path = "../pgroove-ui" }
+log.workspace = true
+env_logger.workspace = true

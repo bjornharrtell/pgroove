@@ -1,0 +1,10 @@
+[package]
+name = "pgroove-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+pgroove-core = { path = "../pgroove-core" }
+log.workspace = true
