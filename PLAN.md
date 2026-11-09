@@ -25,7 +25,7 @@ Cargo workspace:
 Key decisions:
 
 - **Driver:** `tokio-postgres` (+ `rustls` TLS). Runs on a tokio runtime; results bridged to gpui via channels/`cx.spawn`. Evaluate wasm story later (would need a proxy; out of scope for v1).
-- **Catalog access:** SQL against `pg_catalog` / `information_schema`, versioned per server major (supported: 14+).
+- **Catalog access:** SQL against `pg_catalog` / `information_schema`, versioned per server major (supported: 13+; features such as `pg_stat_statements` timing columns rely on this).
 - **State:** one `Workspace` model per window holding connections, open tabs, selection; views observe it.
 - **Result handling:** stream rows in batches into a virtualized table; cancel via `pg_cancel_backend`/cancel token; hard row cap with "load more".
 - **Secrets:** OS keychain (`keyring` crate); connection config in TOML under XDG config dir.
@@ -61,7 +61,7 @@ Key decisions:
 - gpui API churn → pin versions, isolate behind `pgroove-ui` wrappers.
 - Text editor component: gpui lacks a mature one; may need to build or embed (tree-sitter highlight). Spike early in M3.
 - Large result sets and memory: enforce batching/caps from M3.
-- Version differences across Postgres majors in catalog queries: cover with matrix tests (14–17).
+- Version differences across Postgres majors in catalog queries: cover with matrix tests (13–18).
 
 ## Open questions
 
