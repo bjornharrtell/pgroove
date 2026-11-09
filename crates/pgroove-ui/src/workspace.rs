@@ -31,7 +31,7 @@ use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
 use crate::query_tab::{DatabaseChosen, EditorResized, QueryTab, RowLimitChanged};
-use crate::schema_tree::{Category, Row, SchemaTree};
+use crate::schema_tree::{Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
 use crate::table_view::{AllowEditing, PageSizeChanged, TableView};
@@ -1731,37 +1731,29 @@ impl Workspace {
                 category,
                 expanded,
                 count,
-            } => {
-                let icon = match category {
-                    Category::Tables => IconName::Table,
-                    Category::Views => IconName::Eye,
-                    Category::Sequences => IconName::Hash,
-                    Category::Types => IconName::Type,
-                    Category::Functions => IconName::Braces,
-                };
-                self.tree_row(("category", i), 3, cx)
-                    .cursor_pointer()
-                    .hover(move |d| d.bg(hover))
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(muted),
-                    )
-                    .child(Icon::new(icon).size_4().text_color(muted))
-                    .child(category.label())
-                    .child(div().text_xs().text_color(muted).child(count.to_string()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(s) = this.session_mut(sid) {
-                            s.tree.toggle_category(&schema, category);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
+            } => self
+                .tree_row(("category", i), 3, cx)
+                .cursor_pointer()
+                .hover(move |d| d.bg(hover))
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_4()
+                    .text_color(muted),
+                )
+                .child(Icon::new(IconName::Folder).size_4().text_color(muted))
+                .child(category.label())
+                .child(div().text_xs().text_color(muted).child(count.to_string()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(s) = this.session_mut(sid) {
+                        s.tree.toggle_category(&schema, category);
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
             Row::Object { schema, name, kind } => {
                 let icon = match kind {
                     ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
@@ -1781,7 +1773,7 @@ impl Workspace {
                 let (s, n) = (schema.clone(), name.clone());
                 let ctx_this = this.clone();
                 let row = self
-                    .tree_row_px(("object", i), leaf_indent(3), cx)
+                    .tree_row_px(("object", i), leaf_indent(4), cx)
                     .child(Icon::new(icon).size_4().text_color(muted))
                     .child(name.clone())
                     .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
