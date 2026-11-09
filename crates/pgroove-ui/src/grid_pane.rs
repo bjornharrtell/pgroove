@@ -2,7 +2,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -57,7 +57,7 @@ pub struct GridPane {
     /// Grid above, cell inspector below; the divider can be dragged.
     split: Entity<ResizableState>,
     editable: bool,
-    edit_input: Entity<InputState>,
+    edit_input: Entity<TextareaState>,
     _subs: Vec<Subscription>,
 }
 
@@ -71,7 +71,7 @@ impl GridPane {
             ResultsTable::default()
         };
         let grid = cx.new(|cx| TableState::new(delegate, window, cx).cell_selectable(true));
-        let edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+        let edit_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Value"));
         let subs = vec![
             cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
                 if let TableEvent::SelectCell(r, c) = ev {
@@ -92,7 +92,14 @@ impl GridPane {
                 }
             }),
             cx.subscribe(&edit_input, |this, input, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
+                // Enter inserts a line break; Ctrl/Cmd+Enter stages the value.
+                if matches!(
+                    ev,
+                    InputEvent::PressEnter {
+                        secondary: true,
+                        ..
+                    }
+                ) {
                     let v = input.read(cx).value().to_string();
                     this.stage(Some(v), cx);
                 }
@@ -285,7 +292,12 @@ impl GridPane {
                             .pb_2()
                             .gap_2()
                             .items_center()
-                            .child(div().flex_1().child(Input::new(&self.edit_input)))
+                            .items_start()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(Textarea::new(&self.edit_input).h(px(96.))),
+                            )
                             .child(
                                 Button::new("stage-value")
                                     .outline()
