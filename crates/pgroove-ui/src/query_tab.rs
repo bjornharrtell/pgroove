@@ -273,14 +273,14 @@ impl QueryTab {
             Ok(out) => {
                 self.record(sql, out.elapsed.as_millis() as u64, true);
                 self.run = RunState::Idle;
-                let set = out.last_rowset().cloned();
+                let set = out.last_rowset();
                 self.bottom = if set.is_some() {
                     BottomTab::Results
                 } else {
                     BottomTab::Messages
                 };
-                self.results
-                    .update(cx, |p, cx| p.set_data(set.as_ref(), cx));
+                // Borrow the rows instead of cloning them first: results can be large.
+                self.results.update(cx, |p, cx| p.set_data(set, cx));
                 self.output = Some(out);
             }
             Err(f) => {

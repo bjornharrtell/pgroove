@@ -55,6 +55,32 @@ impl QueryOutput {
     }
 }
 
+/// Longest cell value kept, in bytes. Longer values (huge geometries, documents, blobs) are
+/// cut and marked, so one wide result can't exhaust memory.
+pub const MAX_CELL_BYTES: usize = 64 * 1024;
+
+const CLIP_MARK: &str = "…[truncated";
+
+/// Cuts a value to `MAX_CELL_BYTES` (at a character boundary) and marks it with its full size.
+pub fn clip_cell(v: &str) -> String {
+    if v.len() <= MAX_CELL_BYTES {
+        return v.to_string();
+    }
+    let mut end = MAX_CELL_BYTES;
+    while !v.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{CLIP_MARK}: {} bytes]", &v[..end], v.len())
+}
+
+/// Whether a cell value was cut by [`clip_cell`].
+pub fn is_clipped(v: &str) -> bool {
+    v.rfind(CLIP_MARK)
+        .and_then(|i| v[i + CLIP_MARK.len()..].strip_prefix(": "))
+        .and_then(|rest| rest.strip_suffix(" bytes]"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Folds simple-query messages into result sets.
 pub fn collect(messages: Vec<SimpleQueryMessage>, max_rows: usize) -> Vec<ResultSet> {
     let mut sets = Vec::new();
@@ -69,11 +95,8 @@ pub fn collect(messages: Vec<SimpleQueryMessage>, max_rows: usize) -> Vec<Result
                     cur.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
                 }
                 if cur.rows.len() < max_rows {
-                    cur.rows.push(
-                        (0..row.len())
-                            .map(|i| row.get(i).map(str::to_string))
-                            .collect(),
-                    );
+                    cur.rows
+                        .push((0..row.len()).map(|i| row.get(i).map(clip_cell)).collect());
                 } else {
                     cur.truncated = true;
                 }
@@ -263,6 +286,28 @@ mod tests {
     }
 
     #[test]
+    fn long_cells_are_clipped_and_marked() {
+        assert_eq!(clip_cell("short"), "short");
+        let exact = "a".repeat(MAX_CELL_BYTES);
+        assert_eq!(clip_cell(&exact), exact);
+        let long = "b".repeat(MAX_CELL_BYTES + 10);
+        let clipped = clip_cell(&long);
+        assert!(clipped.starts_with(&"b".repeat(MAX_CELL_BYTES)));
+        assert!(clipped.ends_with("…[truncated: 65546 bytes]"));
+        assert!(is_clipped(&clipped));
+        assert!(!is_clipped(&long));
+        assert!(!is_clipped("…[truncated: soon bytes]"));
+        assert!(!is_clipped("…[truncated: bytes]"));
+        assert!(!is_clipped("plain"));
+        // Multi-byte characters are never split.
+        let wide = "é".repeat(MAX_CELL_BYTES);
+        let clipped = clip_cell(&wide);
+        assert!(clipped.len() < wide.len());
+        assert!(is_clipped(&clipped));
+        assert!(clipped.chars().take_while(|c| *c == 'é').count() * 2 <= MAX_CELL_BYTES);
+    }
+
+    #[test]
     fn collect_empty() {
         assert!(collect(vec![], 10).is_empty());
         assert!(collect(vec![SimpleQueryMessage::CommandComplete(2)], 10)[0].count == 2);
@@ -285,6 +330,15 @@ mod tests {
         assert_eq!(o.sets[0].rows, [[Some("1".to_string()), None]]);
         let last = o.last_rowset().unwrap();
         assert_eq!((last.rows.len(), last.count, last.truncated), (3, 5, true));
+        let big = run(&client, "select repeat('é', 200000) as v", 3)
+            .await
+            .unwrap();
+        let cell = big.sets[0].rows[0][0].as_deref().unwrap();
+        assert!(
+            is_clipped(cell) && cell.len() < MAX_CELL_BYTES + 64,
+            "{}",
+            cell.len()
+        );
         let err = run(&client, "select * from nope", 3).await.unwrap_err();
         assert!(err.to_string().contains("nope"), "{err}");
         let qe = err.downcast_ref::<QueryError>().expect("structured error");

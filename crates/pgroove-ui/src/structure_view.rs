@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -94,12 +95,30 @@ fn section(title: &str, count: usize, border: Hsla, muted: Hsla) -> Div {
     )
 }
 
-fn cell(width: f32, text: impl Into<SharedString>) -> Div {
-    div()
-        .w(px(width))
-        .flex_shrink_0()
+/// Collapses line breaks and runs of whitespace so text fits on one line.
+pub fn single_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A one-line cell: the text never wraps, overflow is clipped with an ellipsis, and the
+/// full original text shows in a tooltip. `width` fixes the cell width; `None` fills the row.
+fn clip(id: impl Into<ElementId>, width: Option<f32>, text: impl AsRef<str>) -> Stateful<Div> {
+    let full: SharedString = text.as_ref().to_string().into();
+    let cell = div()
+        .id(id)
+        .min_w_0()
         .truncate()
-        .child(text.into())
+        .whitespace_nowrap()
+        .child(single_line(text.as_ref()));
+    let cell = match width {
+        Some(w) => cell.w(px(w)).flex_shrink_0(),
+        None => cell.flex_1(),
+    };
+    if full.trim().is_empty() {
+        cell
+    } else {
+        cell.tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+    }
 }
 
 impl Render for StructureView {
@@ -136,9 +155,9 @@ impl Render for StructureView {
             structure::format_rows(st.stats.estimated_rows),
         );
 
-        let columns = st.columns.iter().fold(
+        let columns = st.columns.iter().enumerate().fold(
             section("Columns", st.columns.len(), border, muted),
-            |sec, c| {
+            |sec, (i, c)| {
                 let mut flags = Vec::new();
                 if c.not_null {
                     flags.push("not null");
@@ -155,12 +174,15 @@ impl Render for StructureView {
                     h_flex()
                         .gap_3()
                         .text_sm()
-                        .child(cell(180., c.name.clone()))
-                        .child(cell(160., c.data_type.clone()).text_color(muted))
-                        .child(cell(150., flags.join(", ")).text_color(muted))
+                        .child(clip(("col-name", i), Some(180.), &c.name))
+                        .child(clip(("col-type", i), Some(160.), &c.data_type).text_color(muted))
                         .child(
-                            cell(
-                                220.,
+                            clip(("col-flags", i), Some(150.), flags.join(", ")).text_color(muted),
+                        )
+                        .child(
+                            clip(
+                                ("col-default", i),
+                                Some(220.),
                                 c.default
                                     .clone()
                                     .filter(|_| !c.generated)
@@ -169,11 +191,12 @@ impl Render for StructureView {
                             .font_family(mono.clone()),
                         )
                         .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .text_color(muted)
-                                .child(c.comment.clone().unwrap_or_default()),
+                            clip(
+                                ("col-comment", i),
+                                None,
+                                c.comment.clone().unwrap_or_default(),
+                            )
+                            .text_color(muted),
                         ),
                 )
             },
@@ -198,23 +221,17 @@ impl Render for StructureView {
                         .gap_3()
                         .items_center()
                         .text_sm()
-                        .child(cell(100., c.kind_label()).text_color(muted))
-                        .child(cell(200., c.name.clone()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .font_family(mono.clone())
-                                .child(c.definition.clone()),
-                        )
+                        .child(clip(("con-kind", i), Some(100.), c.kind_label()).text_color(muted))
+                        .child(clip(("con-name", i), Some(200.), &c.name))
+                        .child(clip(("con-def", i), None, &c.definition).font_family(mono.clone()))
                         .children(link),
                 )
             },
         );
 
-        let indexes = st.indexes.iter().fold(
+        let indexes = st.indexes.iter().enumerate().fold(
             section("Indexes", st.indexes.len(), border, muted),
-            |sec, i| {
+            |sec, (n, i)| {
                 let tag = if i.primary {
                     "primary"
                 } else if i.unique {
@@ -226,35 +243,29 @@ impl Render for StructureView {
                     h_flex()
                         .gap_3()
                         .text_sm()
-                        .child(cell(200., i.name.clone()))
-                        .child(cell(70., tag).text_color(muted))
+                        .child(clip(("idx-name", n), Some(200.), &i.name))
+                        .child(clip(("idx-tag", n), Some(70.), tag).text_color(muted))
                         .child(
-                            div()
-                                .flex_1()
-                                .truncate()
+                            clip(("idx-def", n), None, &i.definition)
                                 .font_family(mono.clone())
-                                .text_color(muted)
-                                .child(i.definition.clone()),
+                                .text_color(muted),
                         ),
                 )
             },
         );
 
-        let triggers = st.triggers.iter().fold(
+        let triggers = st.triggers.iter().enumerate().fold(
             section("Triggers", st.triggers.len(), border, muted),
-            |sec, t| {
+            |sec, (n, t)| {
                 sec.child(
                     h_flex()
                         .gap_3()
                         .text_sm()
-                        .child(cell(200., t.name.clone()))
+                        .child(clip(("trg-name", n), Some(200.), &t.name))
                         .child(
-                            div()
-                                .flex_1()
-                                .truncate()
+                            clip(("trg-def", n), None, &t.definition)
                                 .font_family(mono.clone())
-                                .text_color(muted)
-                                .child(t.definition.clone()),
+                                .text_color(muted),
                         ),
                 )
             },
@@ -303,5 +314,21 @@ impl Render for StructureView {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_line;
+
+    #[test]
+    fn comments_collapse_to_one_line() {
+        assert_eq!(
+            single_line("first line\nsecond\r\n  third\tfourth"),
+            "first line second third fourth"
+        );
+        assert_eq!(single_line("  padded  "), "padded");
+        assert_eq!(single_line("\n\n"), "");
+        assert_eq!(single_line("plain"), "plain");
     }
 }

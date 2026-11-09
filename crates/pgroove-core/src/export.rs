@@ -51,6 +51,57 @@ pub fn to_json(columns: &[String], rows: &Rows) -> String {
     serde_json::to_string_pretty(&objects).unwrap_or_else(|_| "[]".into())
 }
 
+/// Characters of a value the inspector shows.
+pub const INSPECT_CHARS: usize = 20_000;
+
+/// Largest value that is parsed for JSON pretty-printing.
+const PRETTY_MAX_BYTES: usize = 1_000_000;
+
+/// A value prepared for display in the inspector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspected {
+    pub text: String,
+    /// The shown text is only the start of the value.
+    pub shortened: bool,
+}
+
+/// Prepares a value for the inspector: pretty-prints JSON (when not huge) and caps the length.
+pub fn inspect_text(v: &str) -> Inspected {
+    let text = if v.len() <= PRETTY_MAX_BYTES {
+        pretty_value(v)
+    } else {
+        v.to_string()
+    };
+    match text.char_indices().nth(INSPECT_CHARS) {
+        Some((end, _)) => Inspected {
+            text: text[..end].to_string(),
+            shortened: true,
+        },
+        None => Inspected {
+            text,
+            shortened: false,
+        },
+    }
+}
+
+/// A single-line preview of at most `max` characters, for grid cells: line breaks become
+/// spaces and longer text ends with an ellipsis.
+pub fn preview(v: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (n, c) in v.chars().enumerate() {
+        if n == max {
+            out.push('…');
+            break;
+        }
+        out.push(if c == '\n' || c == '\r' || c == '\t' {
+            ' '
+        } else {
+            c
+        });
+    }
+    out
+}
+
 /// Pretty-prints JSON objects and arrays; anything else is returned unchanged.
 pub fn pretty_value(v: &str) -> String {
     let t = v.trim_start();
@@ -95,6 +146,33 @@ mod tests {
         assert!(v[1]["note"].is_null());
         assert_eq!(v[2]["id"], "3");
         assert_eq!(to_json(&cols(), &[]), "[]");
+    }
+
+    #[test]
+    fn inspect_caps_long_values() {
+        let short = inspect_text("{\"a\":1}");
+        assert_eq!(short.text, "{\n  \"a\": 1\n}");
+        assert!(!short.shortened);
+        let long = "x".repeat(INSPECT_CHARS + 5);
+        let i = inspect_text(&long);
+        assert!(i.shortened);
+        assert_eq!(i.text.chars().count(), INSPECT_CHARS);
+        let exact = "y".repeat(INSPECT_CHARS);
+        assert!(!inspect_text(&exact).shortened);
+        let huge = format!("[{}]", "1,".repeat(600_000));
+        assert!(
+            inspect_text(&huge).shortened,
+            "huge JSON is not parsed, only cut"
+        );
+    }
+
+    #[test]
+    fn previews_are_single_line_and_short() {
+        assert_eq!(preview("a\nb\r\nc\td", 50), "a b  c d");
+        assert_eq!(preview("abcdef", 3), "abc…");
+        assert_eq!(preview("abc", 3), "abc");
+        assert_eq!(preview("åäöxyz", 3), "åäö…");
+        assert_eq!(preview("", 3), "");
     }
 
     #[test]

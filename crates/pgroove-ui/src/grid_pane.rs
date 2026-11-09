@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::edit::EditSession;
 use pgroove_core::export;
+use pgroove_core::query;
 use pgroove_core::query::ResultSet;
 
 use crate::results::ResultsTable;
@@ -39,9 +40,20 @@ impl Format {
 /// Emitted when staged edits change.
 pub struct GridChanged;
 
+/// The selected cell, prepared once for the inspector.
+struct Inspected {
+    /// Display text; `None` is SQL NULL.
+    text: Option<String>,
+    /// Why the shown value differs from the stored one, if it does.
+    note: Option<&'static str>,
+    /// Whether the value can be edited in the input below.
+    can_edit: bool,
+}
+
 pub struct GridPane {
     grid: Entity<TableState<ResultsTable>>,
     selected: Option<(usize, usize)>,
+    inspected: Option<Inspected>,
     editable: bool,
     edit_input: Entity<InputState>,
     _subs: Vec<Subscription>,
@@ -62,7 +74,8 @@ impl GridPane {
             cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
                 if let TableEvent::SelectCell(r, c) = ev {
                     this.selected = Some((*r, *c));
-                    if this.editable {
+                    this.refresh_inspected(cx);
+                    if this.editable && this.inspected.as_ref().is_some_and(|i| i.can_edit) {
                         let text = this
                             .grid
                             .read(cx)
@@ -86,10 +99,43 @@ impl GridPane {
         Self {
             grid,
             selected: None,
+            inspected: None,
             editable: false,
             edit_input,
             _subs: subs,
         }
+    }
+
+    /// Prepares the selected cell for the inspector (capped, pretty-printed once).
+    fn refresh_inspected(&mut self, cx: &App) {
+        let Some((r, c)) = self.selected else {
+            self.inspected = None;
+            return;
+        };
+        let value = self.grid.read(cx).delegate().cell(r, c);
+        self.inspected = Some(match value {
+            None => Inspected {
+                text: None,
+                note: None,
+                can_edit: true,
+            },
+            Some(v) => {
+                let clipped = query::is_clipped(v);
+                let shown = export::inspect_text(v);
+                let note = if clipped {
+                    Some("Longer than 64 KiB: the value was cut when it was loaded.")
+                } else if shown.shortened {
+                    Some("Showing the start of a long value.")
+                } else {
+                    None
+                };
+                Inspected {
+                    text: Some(shown.text),
+                    note,
+                    can_edit: note.is_none(),
+                }
+            }
+        });
     }
 
     pub fn selected(&self) -> Option<(usize, usize)> {
@@ -131,6 +177,7 @@ impl GridPane {
     fn stage(&mut self, value: Option<String>, cx: &mut Context<Self>) {
         if let Some((r, c)) = self.selected {
             self.edit_session(cx, |s| s.set_value(r, c, value));
+            self.refresh_inspected(cx);
         }
     }
 
@@ -141,6 +188,7 @@ impl GridPane {
     /// Replaces the shown data and clears the cell selection.
     pub fn set_data(&mut self, set: Option<&ResultSet>, cx: &mut Context<Self>) {
         self.selected = None;
+        self.inspected = None;
         self.grid.update(cx, |g, cx| {
             g.delegate_mut().set(set);
             g.refresh(cx);
@@ -187,10 +235,13 @@ impl GridPane {
 
     fn render_inspector(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (r, c) = self.selected?;
+        let inspected = self.inspected.as_ref()?;
         let theme = cx.theme().clone();
-        let t = self.grid.read(cx).delegate();
-        let name = t.column_name(c)?.to_string();
-        let value = t.cell(r, c).map(export::pretty_value);
+        let name = self.grid.read(cx).delegate().column_name(c)?.to_string();
+        let grid = self.grid.clone();
+        let editable = self.editable && inspected.can_edit;
+        let note = inspected.note;
+        let text = inspected.text.clone();
         Some(
             v_flex()
                 .flex_shrink_0()
@@ -206,6 +257,7 @@ impl GridPane {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(format!("{name} · row {}", r + 1))
+                        .children(note.map(|n| div().text_color(theme.warning).child(n)))
                         .child(div().flex_1())
                         .child(
                             Button::new("copy-cell")
@@ -213,20 +265,18 @@ impl GridPane {
                                 .xsmall()
                                 .icon(IconName::Copy)
                                 .tooltip("Copy value")
-                                .on_click({
-                                    let value = value.clone();
-                                    move |_, window, cx| {
-                                        if let Some(v) = &value {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                v.clone(),
-                                            ));
-                                            window.push_notification("Copied value", cx);
-                                        }
+                                .on_click(move |_, window, cx| {
+                                    // Read at click time; the inspector only holds a preview.
+                                    let value =
+                                        grid.read(cx).delegate().cell(r, c).map(str::to_string);
+                                    if let Some(v) = value {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(v));
+                                        window.push_notification("Copied value", cx);
                                     }
                                 }),
                         ),
                 )
-                .when(self.editable, |d| {
+                .when(editable, |d| {
                     d.child(
                         h_flex()
                             .px_3()
@@ -253,7 +303,7 @@ impl GridPane {
                             ),
                     )
                 })
-                .when(!self.editable, |d| {
+                .when(!editable, |d| {
                     d.child(
                         div()
                             .id("inspector-value")
@@ -262,7 +312,7 @@ impl GridPane {
                             .overflow_y_scroll()
                             .font_family(theme.mono_font_family.clone())
                             .text_sm()
-                            .child(match value {
+                            .child(match text {
                                 Some(v) => div().child(v),
                                 None => div()
                                     .italic()

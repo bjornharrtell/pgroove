@@ -6,6 +6,9 @@ use gpui_kit::*;
 use pgroove_core::edit::EditSession;
 use pgroove_core::query::ResultSet;
 
+/// Characters of a cell drawn in the grid; the rest is in the inspector.
+const MAX_CELL_CHARS: usize = 300;
+
 #[derive(Default)]
 pub struct ResultsTable {
     names: Vec<String>,
@@ -153,7 +156,9 @@ impl TableDelegate for ResultsTable {
                 )
             });
         let base = match self.cell(row_ix, col_ix) {
-            Some(v) => div().truncate().child(v.to_string()),
+            Some(v) => div()
+                .truncate()
+                .child(pgroove_core::export::preview(v, MAX_CELL_CHARS)),
             None => div().italic().opacity(0.5).child("NULL"),
         };
         if deleted {

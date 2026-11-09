@@ -432,25 +432,20 @@ impl TableView {
                     return;
                 }
                 match result {
-                    Ok((page, pk)) => {
+                    Ok((mut page, pk)) => {
                         this.rows = page.data.rows.len();
                         this.notice = None;
+                        this.has_more = page.has_more;
+                        this.pane
+                            .update(cx, |p, cx| p.set_data(Some(&page.data), cx));
+                        // The grid keeps one copy of the rows; the edit session takes the
+                        // original instead of a third copy, which matters for wide tables.
+                        let rows = std::mem::take(&mut page.data.rows);
                         let session = (!pk.is_empty())
-                            .then(|| {
-                                EditSession::new(
-                                    page.data.columns.clone(),
-                                    &pk,
-                                    page.data.rows.clone(),
-                                )
-                                .ok()
-                            })
+                            .then(|| EditSession::new(page.data.columns.clone(), &pk, rows).ok())
                             .flatten();
                         this.pk = if session.is_some() { pk } else { Vec::new() };
-                        this.has_more = page.has_more;
-                        this.pane.update(cx, |p, cx| {
-                            p.set_data(Some(&page.data), cx);
-                            p.set_session(session, cx);
-                        });
+                        this.pane.update(cx, |p, cx| p.set_session(session, cx));
                         this.load = Load::Ready;
                     }
                     Err(e) => this.load = Load::Failed(e),

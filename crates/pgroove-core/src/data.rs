@@ -178,4 +178,48 @@ mod tests {
             .is_err()
         );
     }
+
+    /// Sorting a table with huge values must not hold the full values in memory.
+    #[tokio::test]
+    async fn wide_rows_stay_bounded_when_sorted() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        client
+            .batch_execute(
+                "drop table if exists pg_temp.pgroove_w; \
+                 create temp table pgroove_w as \
+                   select g as id, repeat(md5(g::text), 20000) as big from generate_series(1, 60) g",
+            )
+            .await
+            .unwrap();
+        let t = TableRef::new("pg_temp", "pgroove_w");
+        let mut req = PageRequest::page(0, 50);
+        req.sort = Some(Sort {
+            column: "big".into(),
+            descending: true,
+        });
+        let page = fetch_page(&client, &t, &req).await.unwrap();
+        assert_eq!(page.data.rows.len(), 50);
+        assert!(page.has_more);
+        let stored: usize = page
+            .data
+            .rows
+            .iter()
+            .flatten()
+            .flatten()
+            .map(String::len)
+            .sum();
+        // Each `big` value is 640 000 bytes on the server; only a bounded prefix is kept.
+        assert!(
+            stored < 50 * (query::MAX_CELL_BYTES + 128),
+            "stored {stored} bytes"
+        );
+        assert!(
+            page.data
+                .rows
+                .iter()
+                .all(|r| query::is_clipped(r[1].as_deref().unwrap()))
+        );
+    }
 }
