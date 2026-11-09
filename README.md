@@ -97,3 +97,6 @@ Layout: `pgroove-core` (no UI: connections, catalog, queries, editing, monitorin
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+The interface uses the [Catppuccin](https://github.com/catppuccin/catppuccin) Latte (light) and
+Mocha (dark) palettes, which are MIT licensed. Copyright (c) 2021 Catppuccin.

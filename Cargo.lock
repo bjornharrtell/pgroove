@@ -4881,6 +4881,7 @@ dependencies = [
  "log",
  "pgroove-core",
  "pgroove-ui",
+ "serde_json",
  "tokio",
 ]
 
