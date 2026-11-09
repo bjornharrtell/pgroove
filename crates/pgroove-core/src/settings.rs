@@ -25,6 +25,9 @@ pub struct Settings {
     /// Rows shown per query run (the Run button always limits).
     #[serde(default = "default_limit")]
     pub query_row_limit: u32,
+    /// Rows per page in the data viewer.
+    #[serde(default = "default_limit")]
+    pub table_page_size: u32,
 }
 
 fn default_limit() -> u32 {
@@ -40,6 +43,7 @@ impl Default for Settings {
         Self {
             check_for_updates: true,
             query_row_limit: DEFAULT_ROW_LIMIT,
+            table_page_size: DEFAULT_ROW_LIMIT,
         }
     }
 }
@@ -94,6 +98,7 @@ mod tests {
         let off = Settings {
             check_for_updates: false,
             query_row_limit: 1000,
+            table_page_size: 500,
         };
         off.save(&path).unwrap();
         assert_eq!(Settings::load(&path), off);

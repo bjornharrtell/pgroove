@@ -13,7 +13,7 @@ Requires PostgreSQL 13 or newer on the server.
 - **SQL editor:** Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`
   with a plan tree that marks the hottest node.
-- **Data viewer:** paged, server-side sorting, filter expression, copy or save as CSV or JSON,
+- **Data viewer:** paged (50 to 10 000 rows per page, remembered), server-side sorting, filter expression, copy or save the page as CSV or JSON, **Export all…** to stream the whole table (with the current filter and sort) to a CSV file,
   cell inspector with pretty-printed JSON.
 - **Table structure:** columns, constraints (foreign keys are links), indexes, triggers,
   sizes and reconstructed DDL.
@@ -63,7 +63,7 @@ by setting `check_for_updates = false` in `settings.toml`, or with the environme
 | File | Location | Purpose |
 |---|---|---|
 | `connections.toml` | config dir `pgroove/` | saved connection profiles (no passwords) |
-| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit) |
+| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit, page size) |
 | `snippets.toml` | config dir `pgroove/` | saved snippets |
 | `keybindings.toml` | config dir `pgroove/` | keybinding overrides |
 | `history.toml` | local data dir `pgroove/` | query history (last 500) |

@@ -6,6 +6,7 @@ use crate::dialogs::DialogActions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::data::{self, PageRequest, Sort, TableRef};
@@ -14,9 +15,8 @@ use tokio::runtime::Runtime;
 
 use crate::grid_pane::{GridChanged, GridPane};
 use crate::mode::ReadOnlyMode;
+use crate::query_tab::format_limit;
 use crate::structure_view::{OpenTable, StructureView};
-
-pub const PAGE_SIZE: u64 = 200;
 
 enum Load {
     Loading,
@@ -47,27 +47,37 @@ pub struct TableView {
     load: Load,
     rows: usize,
     has_more: bool,
+    /// Rows per page.
+    page_size: u32,
+    /// A whole-table export is running (clicking Export again cancels it).
+    exporting: bool,
     /// Bumped per request so stale responses are ignored.
     generation: u64,
     _subs: Vec<Subscription>,
 }
 
 /// Human-readable row range for a page, e.g. `201–400`.
-pub fn range_label(page: u64, rows: usize) -> String {
+pub fn range_label(page: u64, page_size: u32, rows: usize) -> String {
     if rows == 0 {
         return "No rows".into();
     }
-    let first = page * PAGE_SIZE + 1;
+    let first = page * u64::from(page_size) + 1;
     format!("{}–{}", first, first + rows as u64 - 1)
 }
 
 impl EventEmitter<OpenTable> for TableView {}
+
+/// Emitted when the user picks another page size, so it can be remembered.
+pub struct PageSizeChanged(pub u32);
+
+impl EventEmitter<PageSizeChanged> for TableView {}
 
 impl TableView {
     pub fn new(
         table: TableRef,
         client: Arc<pgroove_core::Client>,
         runtime: Arc<Runtime>,
+        page_size: u32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -105,6 +115,8 @@ impl TableView {
             load: Load::Loading,
             rows: 0,
             has_more: false,
+            page_size: pgroove_core::settings::clamp_row_limit(page_size),
+            exporting: false,
             generation: 0,
             _subs: subs,
         };
@@ -400,6 +412,124 @@ impl TableView {
         self.reload(cx);
     }
 
+    /// Uses another page size (from another tab's choice) and returns to the first page.
+    pub(crate) fn apply_page_size(&mut self, size: u32, cx: &mut Context<Self>) {
+        let size = pgroove_core::settings::clamp_row_limit(size);
+        if size == self.page_size || self.pending(cx) > 0 {
+            return;
+        }
+        self.page_size = size;
+        self.page = 0;
+        self.reload(cx);
+    }
+
+    fn pick_page_size(&mut self, size: u32, cx: &mut Context<Self>) {
+        if self.blocked_by_pending(cx) {
+            return;
+        }
+        self.apply_page_size(size, cx);
+        cx.emit(PageSizeChanged(self.page_size));
+    }
+
+    /// Streams the whole table (with the current filter and sort) to a CSV file.
+    /// While an export runs, clicking again cancels it.
+    fn export_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.exporting {
+            let client = self.client.clone();
+            self.runtime.spawn(async move {
+                if let Err(e) = data::cancel_running(&client).await {
+                    log::warn!("cancel failed: {e:#}");
+                }
+            });
+            return;
+        }
+        let sql = data::build_export_select(
+            &self.table,
+            self.sort.as_ref(),
+            self.applied_filter.as_deref(),
+        );
+        let dir = std::env::current_dir().unwrap_or_default();
+        let rx = cx.prompt_for_new_path(&dir, Some(&format!("{}.csv", self.table.name)));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.start_export(sql, path, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_export(
+        &mut self,
+        sql: String,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.exporting = true;
+        cx.notify();
+        let client = self.client.clone();
+        let dest = path.clone();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::query::export_csv(&client, &sql, &dest).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match task.await {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            };
+            this.update_in(cx, move |this, window, cx| {
+                this.exporting = false;
+                match result {
+                    Ok(bytes) => window.push_notification(
+                        format!(
+                            "Exported {} to {}",
+                            pgroove_core::structure::format_bytes(bytes),
+                            path.display()
+                        ),
+                        cx,
+                    ),
+                    Err(e) => window.push_notification(
+                        gpui_kit::component::notification::Notification::error(format!(
+                            "Export failed: {e}"
+                        )),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_page_size_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity();
+        let current = self.page_size;
+        Button::new("page-size")
+            .ghost()
+            .xsmall()
+            .label(format!("{} rows/page", format_limit(current)))
+            .tooltip("Rows per page")
+            .dropdown_menu(move |menu, _, _| {
+                pgroove_core::settings::ROW_LIMIT_PRESETS
+                    .iter()
+                    .fold(menu, |m, &n| {
+                        let this = this.clone();
+                        m.item(
+                            PopupMenuItem::new(format!("{} rows", format_limit(n)))
+                                .checked(n == current)
+                                .on_click(move |_, _, cx| {
+                                    this.update(cx, |t, cx| t.pick_page_size(n, cx))
+                                }),
+                        )
+                    })
+            })
+    }
+
     fn go(&mut self, page: u64, cx: &mut Context<Self>) {
         if self.blocked_by_pending(cx) {
             return;
@@ -413,7 +543,7 @@ impl TableView {
         let generation = self.generation;
         self.load = Load::Loading;
         cx.notify();
-        let mut req = PageRequest::page(self.page, PAGE_SIZE);
+        let mut req = PageRequest::page(self.page, u64::from(self.page_size));
         req.sort = self.sort.clone();
         req.filter = self.applied_filter.clone();
         let (client, table) = (self.client.clone(), self.table.clone());
@@ -521,7 +651,7 @@ impl Render for TableView {
         };
         let status = match self.load {
             Load::Loading => "Loading…".to_string(),
-            _ => range_label(self.page, self.rows),
+            _ => range_label(self.page, self.page_size, self.rows),
         };
         v_flex()
             .size_full()
@@ -537,6 +667,26 @@ impl Render for TableView {
                     .border_color(theme.border)
                     .child(div().flex_1().child(Input::new(&self.filter)))
                     .child(self.pane.read(cx).actions())
+                    .child(
+                        Button::new("export-all")
+                            .ghost()
+                            .xsmall()
+                            .icon(if self.exporting {
+                                IconName::X
+                            } else {
+                                IconName::FileDown
+                            })
+                            .label(if self.exporting {
+                                "Cancel export"
+                            } else {
+                                "Export all…"
+                            })
+                            .tooltip(
+                                "Stream every row of the table (with this filter and sort) to a CSV file",
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| this.export_all(window, cx))),
+                    )
+                    .child(self.render_page_size_button(cx))
                     .child(
                         Button::new("prev")
                             .ghost()
@@ -581,8 +731,9 @@ mod tests {
 
     #[test]
     fn range_labels() {
-        assert_eq!(range_label(0, 0), "No rows");
-        assert_eq!(range_label(0, 200), "1–200");
-        assert_eq!(range_label(2, 5), "401–405");
+        assert_eq!(range_label(0, 200, 0), "No rows");
+        assert_eq!(range_label(0, 200, 200), "1–200");
+        assert_eq!(range_label(2, 200, 5), "401–405");
+        assert_eq!(range_label(1, 1000, 1000), "1001–2000");
     }
 }

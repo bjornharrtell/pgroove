@@ -34,7 +34,7 @@ use crate::query_tab::{QueryTab, RowLimitChanged};
 use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
-use crate::table_view::TableView;
+use crate::table_view::{PageSizeChanged, TableView};
 
 /// How far a session's connection has got.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -793,7 +793,12 @@ impl Workspace {
             self.active_tab = ix;
         } else if let Some(client) = self.client_of(sid) {
             let runtime = self.runtime.clone();
-            let view = cx.new(|cx| TableView::new(table, client, runtime, window, cx));
+            let page_size = self.settings.table_page_size;
+            let view = cx.new(|cx| TableView::new(table, client, runtime, page_size, window, cx));
+            cx.subscribe(&view, |this, _, ev: &PageSizeChanged, cx| {
+                this.set_page_size(ev.0, cx)
+            })
+            .detach();
             cx.subscribe_in(&view, window, move |this, _, ev: &OpenTable, window, cx| {
                 this.open_table(sid, ev.0.clone(), window, cx)
             })
@@ -1075,6 +1080,22 @@ impl Workspace {
         for t in &self.tabs {
             if let TabKind::Query(q, _) = t {
                 q.update(cx, |q, cx| q.apply_limit(limit, cx));
+            }
+        }
+    }
+
+    /// Remembers a new data-viewer page size and gives it to every table tab.
+    fn set_page_size(&mut self, size: u32, cx: &mut Context<Self>) {
+        let size = pgroove_core::settings::clamp_row_limit(size);
+        self.settings.table_page_size = size;
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            log::warn!("could not save settings: {e:#}");
+        }
+        for t in &self.tabs {
+            if let TabKind::Table(v, _) = t {
+                v.update(cx, |v, cx| v.apply_page_size(size, cx));
             }
         }
     }

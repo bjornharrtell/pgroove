@@ -56,25 +56,39 @@ impl PageRequest {
     }
 }
 
-pub fn build_select(table: &TableRef, req: &PageRequest) -> String {
+/// `select *` with the optional filter and sort, without paging.
+fn base_select(table: &TableRef, sort: Option<&Sort>, filter: Option<&str>) -> String {
     let mut sql = format!("select * from {}", table.qualified());
-    if let Some(f) = req
-        .filter
-        .as_deref()
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
-    {
+    if let Some(f) = filter.map(str::trim).filter(|f| !f.is_empty()) {
         sql.push_str(&format!(" where {f}"));
     }
-    if let Some(s) = &req.sort {
+    if let Some(s) = sort {
         sql.push_str(&format!(
             " order by {} {}",
             quote_ident(&s.column),
             if s.descending { "desc" } else { "asc" }
         ));
     }
-    sql.push_str(&format!(" limit {} offset {}", req.limit, req.offset));
     sql
+}
+
+pub fn build_select(table: &TableRef, req: &PageRequest) -> String {
+    format!(
+        "{} limit {} offset {}",
+        base_select(table, req.sort.as_ref(), req.filter.as_deref()),
+        req.limit,
+        req.offset
+    )
+}
+
+/// The query for exporting a whole table: the viewer's filter and sort, but no paging.
+pub fn build_export_select(table: &TableRef, sort: Option<&Sort>, filter: Option<&str>) -> String {
+    base_select(table, sort, filter)
+}
+
+/// Asks the server to cancel what this connection is running (for example an export).
+pub async fn cancel_running(client: &Client) -> Result<()> {
+    query::cancel(client).await
 }
 
 /// A fetched page; `has_more` is true when another page exists.
@@ -131,6 +145,18 @@ mod tests {
         );
         r.filter = Some("  ".into());
         assert!(!build_select(&t, &r).contains("where"));
+        let sort = Sort {
+            column: "id".into(),
+            descending: false,
+        };
+        assert_eq!(
+            build_export_select(&t, Some(&sort), Some(" total > 5 ")),
+            "select * from \"public\".\"orders\" where total > 5 order by \"id\" asc"
+        );
+        assert_eq!(
+            build_export_select(&t, None, None),
+            "select * from \"public\".\"orders\""
+        );
     }
 
     #[tokio::test]
@@ -221,5 +247,37 @@ mod tests {
                 .iter()
                 .all(|r| query::is_clipped(r[1].as_deref().unwrap()))
         );
+    }
+
+    /// A whole-table export honours the viewer's filter and sort and is not limited to a page.
+    #[tokio::test]
+    async fn export_whole_table_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        client
+            .batch_execute(
+                "drop table if exists pg_temp.pgroove_e; \
+                 create temp table pgroove_e as select g as id from generate_series(1, 3000) g",
+            )
+            .await
+            .unwrap();
+        let t = TableRef::new("pg_temp", "pgroove_e");
+        let sort = Sort {
+            column: "id".into(),
+            descending: true,
+        };
+        let sql = build_export_select(&t, Some(&sort), Some("id > 1000"));
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("t.csv");
+        query::export_csv(&client, &sql, &dest).await.unwrap();
+        let text = std::fs::read_to_string(&dest).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1 + 2000,
+            "header plus every filtered row, not one page"
+        );
+        assert_eq!((lines[0], lines[1], lines[2000]), ("id", "3000", "1001"));
     }
 }
