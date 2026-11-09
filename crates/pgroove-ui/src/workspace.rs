@@ -2539,7 +2539,12 @@ impl Workspace {
             bar = bar.child(match kind {
                 TabKind::Query(_, n) => Tab::new()
                     .label(format!("Query {n}"))
-                    .prefix(div().px_1().child(Icon::new(IconName::Code).size_4()))
+                    .prefix(
+                        div()
+                            .pl_3()
+                            .pr_1()
+                            .child(Icon::new(IconName::Code).size_4()),
+                    )
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
@@ -2555,7 +2560,12 @@ impl Workspace {
                         Some(s) => format!("Activity · {}", s.label()),
                         None => "Activity".to_string(),
                     })
-                    .prefix(div().px_1().child(Icon::new(IconName::Activity).size_4()))
+                    .prefix(
+                        div()
+                            .pl_3()
+                            .pr_1()
+                            .child(Icon::new(IconName::Activity).size_4()),
+                    )
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
@@ -2568,7 +2578,12 @@ impl Workspace {
                     ),
                 TabKind::Table(v, sid) => Tab::new()
                     .label(self.tab_label(&v.read(cx).table().name, *sid))
-                    .prefix(div().px_1().child(Icon::new(IconName::Table).size_4()))
+                    .prefix(
+                        div()
+                            .pl_3()
+                            .pr_1()
+                            .child(Icon::new(IconName::Table).size_4()),
+                    )
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
@@ -2582,14 +2597,16 @@ impl Workspace {
             });
         }
         bar.suffix(
-            Button::new("new-query")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Plus)
-                .tooltip("New query tab")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.new_query(window, cx);
-                })),
+            div().px_3().child(
+                Button::new("new-query")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip("New query tab")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_query(window, cx);
+                    })),
+            ),
         )
     }
 
