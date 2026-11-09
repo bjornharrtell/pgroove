@@ -93,3 +93,7 @@ PGROOVE_TEST_KEYRING=1 cargo test --workspace
 Layout: `pgroove-core` (no UI: connections, catalog, queries, editing, monitoring),
 `pgroove-ui` (gpui views), `pgroove-app` (the binary). The design notes live in
 [PLAN.md](PLAN.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

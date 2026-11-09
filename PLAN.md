@@ -80,4 +80,3 @@ All milestones M0–M9 are implemented.
 ## Open questions
 
 - Several simultaneous connections per window?
-- License choice.
