@@ -29,13 +29,17 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - run: cargo build --release -p pgroove-app
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package (linux)
+        if: runner.os == 'Linux'
         run: |
           mkdir dist
           cp target/release/pgroove README.md dist/
           cp packaging/pgroove.desktop dist/
           tar -C dist -czf pgroove-${{ github.ref_name }}-${{ matrix.name }}.tar.gz .
+      # An unsigned .app in a .dmg for people, and a tarball of the same .app for the updater.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: sh packaging/build-macos-app.sh "${GITHUB_REF_NAME#v}" pgroove-${{ github.ref_name }}-${{ matrix.name }}
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -50,7 +54,7 @@ jobs:
       - name: Checksums (unix)
         if: runner.os != 'Windows'
         run: |
-          for f in pgroove-*.tar.gz pgroove-*.AppImage; do
+          for f in pgroove-*.tar.gz pgroove-*.AppImage pgroove-*.dmg; do
             [ -f "$f" ] && shasum -a 256 "$f" > "$f.sha256"
           done
           ls pgroove-*
@@ -70,6 +74,8 @@ jobs:
             pgroove-*.tar.gz.sha256
             pgroove-*.zip
             pgroove-*.zip.sha256
+            pgroove-*.dmg
+            pgroove-*.dmg.sha256
             pgroove-*.AppImage
             pgroove-*.AppImage.sha256
           if-no-files-found: error

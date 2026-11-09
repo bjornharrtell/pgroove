@@ -44,3 +44,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Exercises the macOS packaging script with a stand-in binary.
+      - name: macOS packaging smoke test
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p target/release
+          printf '#!/bin/sh\n' > target/release/pgroove && chmod +x target/release/pgroove
+          sh packaging/build-macos-app.sh 0.0.0 "$RUNNER_TEMP/pgroove-test"
+          test -s "$RUNNER_TEMP/pgroove-test.dmg"
+          tar -tzf "$RUNNER_TEMP/pgroove-test.tar.gz" | grep -q 'pgroove.app/Contents/MacOS/pgroove'
+          tar -tzf "$RUNNER_TEMP/pgroove-test.tar.gz" | grep -q 'pgroove.app/Contents/Resources/pgroove.icns'

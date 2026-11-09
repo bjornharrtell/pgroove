@@ -37,8 +37,13 @@ fontconfig). See `.github/workflows/ci.yml` for the exact package list.
 ## Downloads
 
 Tagged releases publish a Linux x86_64 AppImage and tarball, a macOS Apple silicon
-(arm64) tarball and a Windows x86_64 zip. The AppImage relies on the system's graphics
-libraries (Vulkan, Wayland or X11); make it executable and run it:
+(arm64) disk image (`.dmg` with `pgroove.app`) and tarball, and a Windows x86_64 zip.
+
+The macOS app is not signed or notarized, so Gatekeeper blocks the first launch: drag it to
+Applications, then right-click it and choose Open (or run
+`xattr -d com.apple.quarantine /Applications/pgroove.app`).
+
+The AppImage relies on the system's graphics libraries (Vulkan, Wayland or X11); make it executable and run it:
 
 ```bash
 chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
