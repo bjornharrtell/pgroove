@@ -30,7 +30,7 @@ fn close_button(cx: &App) -> impl IntoElement {
         .items_center()
         .justify_center()
         .size(px(24.))
-        .mr_2()
+        .mx_2()
         .rounded(px(6.))
         .text_color(color)
         .cursor_pointer()
@@ -82,6 +82,8 @@ pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -
                 .flex()
                 .items_center()
                 .window_control_area(WindowControlArea::Drag)
+                // Keep the content (the palette button) clear of the close button.
+                .pr_4()
                 .child(content),
         )
         .when(client_decorated && cfg!(target_os = "linux"), |d| {

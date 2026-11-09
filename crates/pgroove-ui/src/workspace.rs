@@ -1252,7 +1252,7 @@ impl Workspace {
             bar = bar.child(match kind {
                 TabKind::Query(_, n) => Tab::new()
                     .label(format!("Query {n}"))
-                    .prefix(Icon::new(IconName::Code).size_4())
+                    .prefix(div().px_1().child(Icon::new(IconName::Code).size_4()))
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
@@ -1265,7 +1265,7 @@ impl Workspace {
                     ),
                 TabKind::Activity(_) => Tab::new()
                     .label("Activity")
-                    .prefix(Icon::new(IconName::Activity).size_4())
+                    .prefix(div().px_1().child(Icon::new(IconName::Activity).size_4()))
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
@@ -1278,7 +1278,7 @@ impl Workspace {
                     ),
                 TabKind::Table(v) => Tab::new()
                     .label(v.read(cx).table().name.clone())
-                    .prefix(Icon::new(IconName::Table).size_4())
+                    .prefix(div().px_1().child(Icon::new(IconName::Table).size_4()))
                     .suffix(
                         Button::new(("close", ix))
                             .ghost()
