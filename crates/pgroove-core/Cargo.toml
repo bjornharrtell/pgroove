@@ -7,7 +7,6 @@ publish.workspace = true
 [dependencies]
 anyhow = "1"
 dirs = "6"
-keyring = "3"
 log.workspace = true
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
@@ -16,3 +15,12 @@ toml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }

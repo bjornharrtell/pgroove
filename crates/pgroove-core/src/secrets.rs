@@ -73,4 +73,18 @@ mod tests {
         s.delete("a").unwrap();
         assert_eq!(s.get("a").unwrap(), None);
     }
+
+    /// Needs a running keychain; enable with `PGROOVE_TEST_KEYRING=1`.
+    #[test]
+    fn keyring_persists_across_entries() {
+        if std::env::var("PGROOVE_TEST_KEYRING").is_err() {
+            return;
+        }
+        let s = KeyringStore;
+        let name = "pgroove-test-entry";
+        s.set(name, "pw").unwrap();
+        assert_eq!(s.get(name).unwrap().as_deref(), Some("pw"));
+        s.delete(name).unwrap();
+        assert_eq!(s.get(name).unwrap(), None);
+    }
 }
