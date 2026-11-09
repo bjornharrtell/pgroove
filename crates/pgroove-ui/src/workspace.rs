@@ -72,6 +72,18 @@ impl DbSession {
 
 actions!(workspace, [OpenPalette]);
 
+/// Left padding of the first tree level and the extra indent per level.
+const TREE_BASE: f32 = 10.;
+const INDENT_STEP: f32 = 16.;
+/// Width of a row's chevron plus gap: leaf rows (no chevron) are indented by this
+/// beyond their parent so their icon lines up with the parent's icon.
+const CHEVRON_WIDTH: f32 = 22.;
+
+/// Left padding for a leaf row under a node at `parent_depth`.
+fn leaf_indent(parent_depth: usize) -> f32 {
+    TREE_BASE + parent_depth as f32 * INDENT_STEP + CHEVRON_WIDTH
+}
+
 enum SidebarItem {
     Connection(usize, ConnectionProfile),
     Database {
@@ -964,16 +976,27 @@ impl Workspace {
         });
     }
 
+    /// A tree row for a node at `depth`; each level indents by `INDENT_STEP`.
     fn tree_row(
         &self,
         id: impl Into<ElementId>,
         depth: usize,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        self.tree_row_px(id, TREE_BASE + depth as f32 * INDENT_STEP, cx)
+    }
+
+    /// A tree row with an explicit left padding in pixels.
+    fn tree_row_px(
+        &self,
+        id: impl Into<ElementId>,
+        left: f32,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         h_flex()
             .id(id)
             .gap_1p5()
-            .pl(px(10. + depth as f32 * 14.))
+            .pl(px(left))
             .pr_2()
             .h(px(26.))
             .flex_shrink_0()
@@ -1082,7 +1105,7 @@ impl Workspace {
                 let (s, n) = (schema.clone(), name.clone());
                 let ctx_this = this.clone();
                 let row = self
-                    .tree_row(("object", i), 4, cx)
+                    .tree_row_px(("object", i), leaf_indent(3), cx)
                     .child(Icon::new(icon).size_4().text_color(muted))
                     .child(name.clone())
                     .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
@@ -1193,13 +1216,13 @@ impl Workspace {
                 }))
                 .into_any_element(),
             Row::Extension { name, version } => self
-                .tree_row(("extension", i), 4, cx)
+                .tree_row_px(("extension", i), leaf_indent(2), cx)
                 .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
                 .child(name)
                 .child(div().text_xs().text_color(muted).child(version))
                 .into_any_element(),
             Row::Message(m) => div()
-                .pl(px(66.))
+                .pl(px(leaf_indent(3)))
                 .h(px(26.))
                 .flex_shrink_0()
                 .flex()
@@ -1391,7 +1414,7 @@ impl Workspace {
                             this.render_tree_item(*sid, *j, r.clone(), cx)
                         }
                         SidebarItem::Note(m) => div()
-                            .pl(px(66.))
+                            .pl(px(leaf_indent(2)))
                             .h(px(26.))
                             .flex_shrink_0()
                             .flex()
@@ -1780,7 +1803,14 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionStatus;
+    use super::{SessionStatus, leaf_indent};
+
+    #[test]
+    fn leaf_icons_align_with_the_parent_icon() {
+        // A parent's icon sits after its chevron; its leaf rows start at the same x.
+        assert_eq!(leaf_indent(3), 10. + 3. * 16. + 22.);
+        assert!(leaf_indent(3) > leaf_indent(2));
+    }
 
     #[test]
     fn status_text() {
