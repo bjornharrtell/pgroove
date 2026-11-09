@@ -142,18 +142,29 @@ pub struct Workspace {
     http: reqwest::Client,
 }
 
+/// State loaded from disk before the window opens.
+pub struct Startup {
+    pub session: SessionState,
+    pub session_path: Option<std::path::PathBuf>,
+    pub settings: Settings,
+    pub settings_path: Option<std::path::PathBuf>,
+}
+
 impl Workspace {
     pub fn new(
         store: ProfileStore,
         secrets: Arc<dyn SecretStore>,
         runtime: Arc<Runtime>,
-        session: SessionState,
-        session_path: Option<std::path::PathBuf>,
-        settings: Settings,
-        settings_path: Option<std::path::PathBuf>,
+        startup: Startup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Startup {
+            session,
+            session_path,
+            settings,
+            settings_path,
+        } = startup;
         let history = History::default_path()
             .and_then(|p| {
                 History::load(p)

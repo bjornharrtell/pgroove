@@ -21,7 +21,7 @@ pub use workspace::Workspace;
 use gpui_kit::{App, KeyBinding};
 
 pub use query_tab::{CancelQuery, FormatSql, RunQuery};
-pub use workspace::OpenPalette;
+pub use workspace::{OpenPalette, Startup};
 
 /// The action and key context for a command name from `pgroove_core::keys`.
 fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static str>)> {

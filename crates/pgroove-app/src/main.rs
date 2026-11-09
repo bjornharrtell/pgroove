@@ -6,7 +6,7 @@ use pgroove_core::ProfileStore;
 use pgroove_core::secrets::KeyringStore;
 use pgroove_core::session::SessionState;
 use pgroove_core::settings::Settings;
-use pgroove_ui::Workspace;
+use pgroove_ui::{Startup, Workspace};
 
 /// Corner radius of the application window.
 const WINDOW_RADIUS: f32 = 10.;
@@ -81,10 +81,12 @@ fn main() -> anyhow::Result<()> {
                         store,
                         Arc::new(KeyringStore),
                         runtime,
-                        session,
-                        session_path,
-                        settings,
-                        settings_path,
+                        Startup {
+                            session,
+                            session_path,
+                            settings,
+                            settings_path,
+                        },
                         window,
                         cx,
                     )
