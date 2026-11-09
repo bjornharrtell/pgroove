@@ -12,6 +12,8 @@ appdir="$work/AppDir"
 mkdir -p "$appdir/usr/bin"
 cp "$root/target/release/pgroove" "$appdir/usr/bin/pgroove"
 cp "$root/packaging/pgroove.desktop" "$appdir/pgroove.desktop"
+# appimagetool derives .DirIcon from a top-level PNG named after Icon= in the desktop file.
+cp "$root/packaging/pgroove.png" "$appdir/pgroove.png"
 cp "$root/packaging/pgroove.svg" "$appdir/pgroove.svg"
 cat > "$appdir/AppRun" <<'RUN'
 #!/bin/sh
