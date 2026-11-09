@@ -78,7 +78,7 @@ impl StructureView {
     }
 }
 
-fn section(title: &str, count: usize, border: Hsla, muted: Hsla) -> Div {
+fn section(title: &str, count: Option<usize>, border: Hsla, muted: Hsla) -> Div {
     v_flex().gap_1().child(
         h_flex()
             .gap_2()
@@ -91,7 +91,7 @@ fn section(title: &str, count: usize, border: Hsla, muted: Hsla) -> Div {
                     .font_weight(FontWeight::MEDIUM)
                     .child(title.to_string()),
             )
-            .child(div().text_xs().text_color(muted).child(count.to_string())),
+            .children(count.map(|n| div().text_xs().text_color(muted).child(n.to_string()))),
     )
 }
 
@@ -156,7 +156,17 @@ impl Render for StructureView {
         );
 
         let columns = st.columns.iter().enumerate().fold(
-            section("Columns", st.columns.len(), border, muted),
+            section("Columns", Some(st.columns.len()), border, muted).child(
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().w(px(180.)).flex_shrink_0().child("Name"))
+                    .child(div().w(px(160.)).flex_shrink_0().child("Type"))
+                    .child(div().w(px(150.)).flex_shrink_0().child("Flags"))
+                    .child(div().w(px(220.)).flex_shrink_0().child("Default"))
+                    .child(div().flex_1().child("Comment")),
+            ),
             |sec, (i, c)| {
                 let mut flags = Vec::new();
                 if c.not_null {
@@ -203,7 +213,7 @@ impl Render for StructureView {
         );
 
         let constraints = st.constraints.iter().enumerate().fold(
-            section("Constraints", st.constraints.len(), border, muted),
+            section("Constraints", Some(st.constraints.len()), border, muted),
             |sec, (i, c)| {
                 let link = c.references.clone().map(|target| {
                     Button::new(("fk", i))
@@ -230,7 +240,7 @@ impl Render for StructureView {
         );
 
         let indexes = st.indexes.iter().enumerate().fold(
-            section("Indexes", st.indexes.len(), border, muted),
+            section("Indexes", Some(st.indexes.len()), border, muted),
             |sec, (n, i)| {
                 let tag = if i.primary {
                     "primary"
@@ -255,7 +265,7 @@ impl Render for StructureView {
         );
 
         let triggers = st.triggers.iter().enumerate().fold(
-            section("Triggers", st.triggers.len(), border, muted),
+            section("Triggers", Some(st.triggers.len()), border, muted),
             |sec, (n, t)| {
                 sec.child(
                     h_flex()
@@ -289,7 +299,7 @@ impl Render for StructureView {
                     .child(triggers)
             })
             .child(
-                section("DDL", 0, border, muted)
+                section("DDL", None, border, muted)
                     .child(
                         h_flex().justify_end().child(
                             Button::new("copy-ddl")

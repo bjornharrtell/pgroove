@@ -30,7 +30,7 @@ use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
-use crate::query_tab::{EditorResized, QueryTab, RowLimitChanged};
+use crate::query_tab::{DatabaseChosen, EditorResized, QueryTab, RowLimitChanged};
 use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
@@ -265,6 +265,14 @@ impl Workspace {
                 });
                 cx.subscribe(&tab, |this, _, ev: &RowLimitChanged, cx| {
                     this.set_row_limit(ev.0, cx)
+                })
+                .detach();
+                cx.subscribe(&tab, |this, tab, ev: &DatabaseChosen, cx| {
+                    this.bind_query(&tab, Some(ev.0), cx)
+                })
+                .detach();
+                cx.subscribe(&tab, |this, tab, ev: &DatabaseChosen, cx| {
+                    this.bind_query(&tab, Some(ev.0), cx)
                 })
                 .detach();
                 cx.subscribe(&tab, |this, _, ev: &EditorResized, cx| {
@@ -1912,6 +1920,7 @@ impl Workspace {
         let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
         let hover = theme.sidebar_accent;
         self.tree_row(("conn", i), 0, cx)
+            .group("conn-row")
             .gap_1()
             .cursor_pointer()
             .hover(move |d| d.bg(hover))
@@ -1936,26 +1945,31 @@ impl Workspace {
             )
             .child(div().flex_1().truncate().child(p.name.clone()))
             .child(
-                Button::new(("edit", i))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Settings)
-                    .tooltip("Edit connection")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_form(Some(pe.clone()), window, cx)
-                    })),
-            )
-            .child(
-                Button::new(("delete", i))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Trash)
-                    .tooltip("Delete connection")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.delete(&pd, cx)
-                    })),
+                h_flex()
+                    .invisible()
+                    .group_hover("conn-row", |d| d.visible())
+                    .child(
+                        Button::new(("edit", i))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Settings)
+                            .tooltip("Edit connection")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_form(Some(pe.clone()), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(("delete", i))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Trash)
+                            .tooltip("Delete connection")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.delete(&pd, cx)
+                            })),
+                    ),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 if is_active {
@@ -2416,13 +2430,8 @@ impl Workspace {
         }
     }
 
-    /// The database picker above a query tab.
-    fn render_query_session_bar(
-        &self,
-        q: &Entity<QueryTab>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme().clone();
+    /// Hands a query tab the label and choices for its database picker.
+    fn sync_query_databases(&self, q: &Entity<QueryTab>, cx: &mut Context<Self>) {
         let label = q
             .read(cx)
             .session()
@@ -2430,40 +2439,11 @@ impl Workspace {
             .map_or_else(|| "No database".to_string(), DbSession::label);
         let choices: Vec<(usize, String)> =
             self.ready_sessions().map(|s| (s.id, s.label())).collect();
-        let (this, tab) = (cx.entity(), q.clone());
-        h_flex()
-            .px_3()
-            .h(px(28.))
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Database"),
-            )
-            .child(
-                Button::new("query-database")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Database)
-                    .label(label)
-                    .tooltip("Choose which open database this query runs against")
-                    .dropdown_menu(move |menu, _, _| {
-                        if choices.is_empty() {
-                            return menu
-                                .item(PopupMenuItem::new("No open databases").disabled(true));
-                        }
-                        choices.iter().fold(menu, |m, (id, label)| {
-                            let (t, tab, id) = (this.clone(), tab.clone(), *id);
-                            m.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| {
-                                t.update(cx, |ws, cx| ws.bind_query(&tab, Some(id), cx))
-                            }))
-                        })
-                    }),
-            )
+        q.update(cx, |t, cx| {
+            if t.set_databases(label, choices) {
+                cx.notify();
+            }
+        });
     }
 
     /// Says which server and database the activity monitor shows, and lets you switch it.
@@ -2636,12 +2616,8 @@ impl Workspace {
             }
             Some(TabKind::Query(q, _)) => {
                 let q = q.clone();
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_query_session_bar(&q, cx))
-                    .child(div().flex_1().min_h_0().child(q))
-                    .into_any_element()
+                self.sync_query_databases(&q, cx);
+                div().flex_1().min_h_0().child(q).into_any_element()
             }
             None => div()
                 .flex_1()
@@ -2660,6 +2636,11 @@ impl Workspace {
             .child(self.render_tab_bar(cx))
             .child(content)
     }
+}
+
+/// "18.6 (Ubuntu 18.6-0ubuntu0.26.04.1)" -> "18.6".
+fn short_version(version: &str) -> &str {
+    version.split_whitespace().next().unwrap_or(version)
 }
 
 pub(crate) fn flatten<T>(
@@ -2682,7 +2663,7 @@ impl Render for Workspace {
         let (left, right) = match self.focused_session(cx).and_then(|id| self.session(id)) {
             Some(s) => match &s.status {
                 SessionStatus::Ready { version } => (
-                    format!("PostgreSQL {version}"),
+                    format!("PostgreSQL {}", short_version(version)),
                     format!("Connected · {}", s.label()),
                 ),
                 other => (String::new(), other.text(&s.label())),
@@ -2771,6 +2752,8 @@ mod tests {
             version: "16.3".into(),
         };
         assert_eq!(r.text("a / b"), "a / b · PostgreSQL 16.3");
+        assert_eq!(super::short_version("18.6 (Ubuntu 18.6-0ubuntu0)"), "18.6");
+        assert_eq!(super::short_version(""), "");
         assert_eq!(
             SessionStatus::Failed("x".into()).text("a / b"),
             "Couldn't connect to a / b: x"

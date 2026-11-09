@@ -97,7 +97,15 @@ pub struct QueryTab {
     /// Editor above, results below; the divider can be dragged.
     split: Entity<ResizableState>,
     editor_height: f32,
+    /// Label of the bound database and the open databases to choose from.
+    database: String,
+    choices: Vec<(usize, String)>,
 }
+
+/// Emitted when the user picks another open database for this tab.
+pub struct DatabaseChosen(pub usize);
+
+impl EventEmitter<DatabaseChosen> for QueryTab {}
 
 /// Emitted when the editor pane is resized, so the height can be remembered.
 pub struct EditorResized(pub f32);
@@ -152,6 +160,8 @@ impl QueryTab {
         Self {
             split,
             editor_height: pgroove_core::session::EDITOR_HEIGHT.0,
+            database: "No database".into(),
+            choices: Vec::new(),
             runtime,
             client: None,
             editor,
@@ -659,6 +669,37 @@ impl QueryTab {
         });
     }
 
+    /// Updates the database picker; true when something changed.
+    pub fn set_databases(&mut self, label: String, choices: Vec<(usize, String)>) -> bool {
+        let changed = self.database != label || self.choices != choices;
+        self.database = label;
+        self.choices = choices;
+        changed
+    }
+
+    /// The database picker at the start of the toolbar.
+    fn render_database_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let choices = self.choices.clone();
+        let this = cx.entity();
+        Button::new("query-database")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Database)
+            .label(self.database.clone())
+            .tooltip("Choose which open database this query runs against")
+            .dropdown_menu(move |menu, _, _| {
+                if choices.is_empty() {
+                    return menu.item(PopupMenuItem::new("No open databases").disabled(true));
+                }
+                choices.iter().fold(menu, |m, (id, label)| {
+                    let (t, id) = (this.clone(), *id);
+                    m.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| {
+                        t.update(cx, |_, cx| cx.emit(DatabaseChosen(id)))
+                    }))
+                })
+            })
+    }
+
     /// The row limit control: the label always states the limit that Run applies.
     fn render_limit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
@@ -829,6 +870,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(|this, _: &FormatSql, window, cx| this.format_sql(window, cx)))
             .child(
                 strip()
+                    .child(self.render_database_button(cx))
                     .child(
                         Button::new("run")
                             .outline()
