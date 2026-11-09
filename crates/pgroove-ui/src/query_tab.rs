@@ -203,7 +203,7 @@ impl QueryTab {
         cx.notify();
     }
 
-    fn run_query(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_query(&mut self, cx: &mut Context<Self>) {
         if self.run == RunState::Running {
             return;
         }
@@ -276,7 +276,7 @@ impl QueryTab {
         cx.notify();
     }
 
-    fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
         if text.trim().is_empty() {
             return;
@@ -286,7 +286,7 @@ impl QueryTab {
             .update(cx, |e, cx| e.set_value(formatted, window, cx));
     }
 
-    fn explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
+    pub(crate) fn explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
         if self.run == RunState::Running {
             return;
         }
@@ -321,7 +321,7 @@ impl QueryTab {
         .detach();
     }
 
-    fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         let history = self.history.clone();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -394,7 +394,7 @@ impl QueryTab {
         });
     }
 
-    fn open_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         let snippets = self.snippets.clone();
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Snippet name"));

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
@@ -22,6 +23,7 @@ use tokio::runtime::Runtime;
 use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
+use crate::palette::{self, PaletteCommand};
 use crate::query_tab::QueryTab;
 use crate::schema_tree::{Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
@@ -47,6 +49,8 @@ impl Status {
         }
     }
 }
+
+actions!(workspace, [OpenPalette]);
 
 enum TabKind {
     Query(Entity<QueryTab>, usize),
@@ -410,6 +414,106 @@ impl Workspace {
             Err(e) => log::warn!("could not load completion index: {e}"),
         })
         .detach();
+    }
+
+    fn active_query(&self) -> Option<Entity<QueryTab>> {
+        match self.tabs.get(self.active_tab) {
+            Some(TabKind::Query(q, _)) => Some(q.clone()),
+            _ => None,
+        }
+    }
+
+    /// Runs a palette command; query commands act on the active (or a new) query tab.
+    fn run_command(&mut self, cmd: PaletteCommand, window: &mut Window, cx: &mut Context<Self>) {
+        use PaletteCommand::*;
+        match cmd {
+            NewQuery => {
+                self.new_query(window, cx);
+            }
+            RunQuery | ExplainQuery | AnalyzeQuery | FormatSql | ShowHistory | ShowSnippets => {
+                let tab = self
+                    .active_query()
+                    .unwrap_or_else(|| self.query_tab(window, cx));
+                tab.update(cx, |t, cx| match cmd {
+                    RunQuery => t.run_query(cx),
+                    ExplainQuery => t.explain(false, cx),
+                    AnalyzeQuery => t.explain(true, cx),
+                    FormatSql => t.format_sql(window, cx),
+                    ShowHistory => t.open_history(window, cx),
+                    _ => t.open_snippets(window, cx),
+                });
+            }
+            ToggleReadOnly => self.toggle_read_only(cx),
+            OpenActivity => self.open_activity(window, cx),
+            RefreshTree => self.refresh_tree(cx),
+            NewConnection => self.open_form(None, window, cx),
+            Connect(name) => {
+                if let Some(p) = self
+                    .store
+                    .profiles()
+                    .iter()
+                    .find(|p| p.name == name)
+                    .cloned()
+                {
+                    self.connect(p, cx);
+                }
+            }
+            Disconnect => self.disconnect(cx),
+        }
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let names: Vec<String> = self
+            .store
+            .profiles()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let groups = std::rc::Rc::new(palette::groups(
+            &names,
+            self.client.is_some(),
+            cx.global::<ReadOnlyMode>().0,
+        ));
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let this = cx.entity();
+        let focus_on_mount = Rc::new(std::cell::Cell::new(true));
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (state, groups, this) = (state.clone(), groups.clone(), this.clone());
+            let focus_on_mount = focus_on_mount.clone();
+            dialog
+                .close_button(false)
+                .p_0()
+                .content(move |content, window, cx| {
+                    if focus_on_mount.replace(false) {
+                        let state = state.clone();
+                        window.defer(cx, move |window, cx| {
+                            state.read(cx).focus_handle(cx).focus(window, cx);
+                        });
+                    }
+                    let mut command = Command::new(&state)
+                        .bordered(false)
+                        .placeholder("Type a command…");
+                    for g in groups.iter() {
+                        command = command.group(g.entries.iter().fold(
+                            CommandGroup::new().label(g.label),
+                            |grp, e| {
+                                grp.item(
+                                    CommandItem::new()
+                                        .label(e.title.clone())
+                                        .keywords(e.keywords.clone()),
+                                )
+                            },
+                        ));
+                    }
+                    let (groups, this) = (groups.clone(), this.clone());
+                    content.child(command.on_confirm(move |ix, window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(cmd) = palette::command_at(&groups, ix.section, ix.row) {
+                            this.update(cx, |ws, cx| ws.run_command(cmd, window, cx));
+                        }
+                    }))
+                })
+        });
     }
 
     fn toggle_read_only(&mut self, cx: &mut Context<Self>) {
@@ -973,7 +1077,8 @@ impl Workspace {
                         .outline()
                         .small()
                         .icon(IconName::Search)
-                        .label("Command palette · Ctrl+K"),
+                        .label("Command palette · Ctrl+K")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
                 ),
         )
     }
@@ -1093,6 +1198,9 @@ impl Render for Workspace {
         v_flex()
             .size_full()
             .key_context("Workspace")
+            .on_action(
+                cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
+            )
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(cx))
