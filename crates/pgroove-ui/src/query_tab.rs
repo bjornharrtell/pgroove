@@ -7,12 +7,14 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState, RopeExt};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::explain::Plan;
 use pgroove_core::history::{self, History, HistoryEntry, Snippets};
 use pgroove_core::query::{self, QueryError, QueryOutput};
+use pgroove_core::structure::format_bytes;
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::GridPane;
@@ -90,6 +92,23 @@ pub struct QueryTab {
     session: Option<usize>,
     /// Completion data of that database (the editor's provider reads it).
     index: SharedIndex,
+    /// Rows a run returns at most; larger results go through Export.
+    row_limit: u32,
+}
+
+/// Emitted when the user picks another row limit, so it can be remembered.
+pub struct RowLimitChanged(pub u32);
+
+impl EventEmitter<RowLimitChanged> for QueryTab {}
+
+/// Formats a limit with a thin grouping space: `10 000`.
+pub fn format_limit(n: u32) -> String {
+    let s = n.to_string();
+    if s.len() <= 3 {
+        return s;
+    }
+    let (head, tail) = s.split_at(s.len() - 3);
+    format!("{head}\u{202f}{tail}")
 }
 
 impl QueryTab {
@@ -98,6 +117,7 @@ impl QueryTab {
         completions: SharedIndex,
         history: Arc<Mutex<History>>,
         snippets: Arc<Mutex<Snippets>>,
+        row_limit: u32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -127,7 +147,19 @@ impl QueryTab {
             snippets,
             session: None,
             index: completions,
+            row_limit: pgroove_core::settings::clamp_row_limit(row_limit),
         }
+    }
+
+    /// Sets the limit without announcing it (used to follow another tab's choice).
+    pub(crate) fn apply_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
+        self.row_limit = pgroove_core::settings::clamp_row_limit(limit);
+        cx.notify();
+    }
+
+    fn pick_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
+        self.apply_limit(limit, cx);
+        cx.emit(RowLimitChanged(self.row_limit));
     }
 
     pub(crate) fn session(&self) -> Option<usize> {
@@ -247,13 +279,14 @@ impl QueryTab {
         if sql.trim().is_empty() {
             return;
         }
+        let limit = self.row_limit as usize;
         self.clear_diagnostics(cx);
         self.run = RunState::Running;
         cx.notify();
         let run_sql = sql.clone();
         let task = self
             .runtime
-            .spawn(async move { query::run(&client, &run_sql, query::MAX_ROWS).await });
+            .spawn(async move { query::run_limited(&client, &run_sql, limit).await });
         cx.spawn(async move |this, cx| {
             let result = split_result(task.await, &sql);
             this.update(cx, |this, cx| this.finish_query(&sql, base, result, cx))
@@ -293,6 +326,77 @@ impl QueryTab {
             }
         }
         cx.notify();
+    }
+
+    /// Streams the full result of the selected (or only) query to a CSV file.
+    pub(crate) fn export_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run == RunState::Running {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return self.not_connected(cx);
+        };
+        let (sql, _) = self.sql_to_run(cx);
+        let statement = match query::export_statement(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                window.push_notification(Notification::error(e.to_string()), cx);
+                return;
+            }
+        };
+        let dir = std::env::current_dir().unwrap_or_default();
+        let rx = cx.prompt_for_new_path(&dir, Some("export.csv"));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.start_export(client, statement, path, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_export(
+        &mut self,
+        client: Arc<pgroove_core::Client>,
+        statement: String,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run = RunState::Running;
+        cx.notify();
+        let dest = path.clone();
+        let task = self
+            .runtime
+            .spawn(async move { query::export_csv(&client, &statement, &dest).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = split_result(task.await, "");
+            this.update_in(cx, move |this, window, cx| {
+                match result {
+                    Ok(bytes) => {
+                        this.run = RunState::Idle;
+                        window.push_notification(
+                            format!("Exported {} to {}", format_bytes(bytes), path.display()),
+                            cx,
+                        );
+                    }
+                    Err(f) => {
+                        window.push_notification(
+                            Notification::error(format!("Export failed: {}", f.text)),
+                            cx,
+                        );
+                        this.run = RunState::Failed(f.text);
+                        this.bottom = BottomTab::Messages;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn cancel_query(&mut self, cx: &mut Context<Self>) {
@@ -533,6 +637,35 @@ impl QueryTab {
         });
     }
 
+    /// The row limit control: the label always states the limit that Run applies.
+    fn render_limit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity();
+        let current = self.row_limit;
+        Button::new("row-limit")
+            .outline()
+            .xsmall()
+            .label(format!("Limit {} rows", format_limit(current)))
+            .tooltip(format!(
+                "Run returns at most this many rows (up to {}). \
+                 Use Export CSV for larger results.",
+                format_limit(pgroove_core::settings::MAX_ROW_LIMIT)
+            ))
+            .dropdown_menu(move |menu, _, _| {
+                pgroove_core::settings::ROW_LIMIT_PRESETS
+                    .iter()
+                    .fold(menu, |m, &n| {
+                        let this = this.clone();
+                        m.item(
+                            PopupMenuItem::new(format!("{} rows", format_limit(n)))
+                                .checked(n == current)
+                                .on_click(move |_, _, cx| {
+                                    this.update(cx, |t, cx| t.pick_limit(n, cx))
+                                }),
+                        )
+                    })
+            })
+    }
+
     fn render_results_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let tab = |id: &'static str, label: &'static str, which: BottomTab| {
@@ -554,8 +687,15 @@ impl QueryTab {
         let summary = match (&self.run, &self.output) {
             (RunState::Running, _) => "Running…".to_string(),
             (_, Some(o)) => {
-                let n = o.last_rowset().map(|s| s.count).unwrap_or(0);
-                format!("{n} rows · {} ms", o.elapsed.as_millis())
+                let n = o.last_rowset().map(|s| s.rows.len()).unwrap_or(0);
+                match o.limit {
+                    Some(l) => format!(
+                        "{n} rows · limit {} · {} ms",
+                        format_limit(l as u32),
+                        o.elapsed.as_millis()
+                    ),
+                    None => format!("{n} rows · {} ms", o.elapsed.as_millis()),
+                }
             }
             _ => String::new(),
         };
@@ -600,11 +740,38 @@ impl QueryTab {
                 .unwrap_or_else(|| "No messages.".into());
             return note(text, theme.foreground);
         }
-        if self.output.as_ref().and_then(|o| o.last_rowset()).is_some() {
-            div()
+        if let Some(set) = self.output.as_ref().and_then(|o| o.last_rowset()) {
+            let banner = set.truncated.then(|| {
+                h_flex()
+                    .gap_3()
+                    .px_3()
+                    .h(px(30.))
+                    .items_center()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .bg(theme.warning.opacity(0.14))
+                    .child(format!(
+                        "Showing only the first {} rows: the query has more. Raise the limit \
+                         (up to {}) or export the whole result.",
+                        format_limit(set.rows.len() as u32),
+                        format_limit(pgroove_core::settings::MAX_ROW_LIMIT),
+                    ))
+                    .child(
+                        Button::new("export-banner")
+                            .outline()
+                            .xsmall()
+                            .icon(IconName::Download)
+                            .label("Export all rows…")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.export_csv(window, cx)),
+                            ),
+                    )
+            });
+            v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.results.clone())
+                .children(banner)
+                .child(div().flex_1().min_h_0().child(self.results.clone()))
                 .into_any_element()
         } else {
             div()
@@ -683,6 +850,20 @@ impl Render for QueryTab {
                             .tooltip("Cancel the running statement (Esc)")
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
                     )
+                    .child(self.render_limit_button(cx))
+                    .child(
+                        Button::new("export")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Download)
+                            .label("Export CSV…")
+                            .tooltip(
+                                "Stream the full result of one query to a file, with no row limit",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.export_csv(window, cx)),
+                            ),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new("history")
@@ -727,8 +908,16 @@ impl Render for QueryTab {
 
 #[cfg(test)]
 mod tests {
-    use super::{one_line, split_result};
+    use super::{format_limit, one_line, split_result};
     use pgroove_core::query::QueryError;
+
+    #[test]
+    fn limits_are_grouped() {
+        assert_eq!(format_limit(50), "50");
+        assert_eq!(format_limit(200), "200");
+        assert_eq!(format_limit(1000), "1\u{202f}000");
+        assert_eq!(format_limit(10_000), "10\u{202f}000");
+    }
 
     #[test]
     fn one_line_shortens() {

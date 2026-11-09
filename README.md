@@ -10,7 +10,7 @@ Requires PostgreSQL 13 or newer on the server.
   TLS modes (`disable`, `prefer`, `require`, `verify-full`), test connection.
 - **Schema browser:** a search box finds tables, views and functions across every schema; lists every database on the server (click to open or close one; several can be open at once, across connections), then a lazy tree of schemas grouped into tables, views, sequences, types and functions, tables, views, sequences, types, functions and
   extensions, with context menus (open data or structure, copy name, show definition).
-- **SQL editor:** several tabs, syntax highlighting, schema-aware completion, formatter,
+- **SQL editor:** Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`
   with a plan tree that marks the hottest node.
 - **Data viewer:** paged, server-side sorting, filter expression, copy or save as CSV or JSON,
@@ -63,7 +63,7 @@ by setting `check_for_updates = false` in `settings.toml`, or with the environme
 | File | Location | Purpose |
 |---|---|---|
 | `connections.toml` | config dir `pgroove/` | saved connection profiles (no passwords) |
-| `settings.toml` | config dir `pgroove/` | preferences (update checks) |
+| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit) |
 | `snippets.toml` | config dir `pgroove/` | saved snippets |
 | `keybindings.toml` | config dir `pgroove/` | keybinding overrides |
 | `history.toml` | local data dir `pgroove/` | query history (last 500) |

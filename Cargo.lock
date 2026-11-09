@@ -4977,6 +4977,7 @@ dependencies = [
  "dbus-secret-service-keyring-store",
  "dirs 7.0.0",
  "flate2",
+ "futures-util",
  "keyring-core",
  "log",
  "percent-encoding",

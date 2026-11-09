@@ -30,7 +30,7 @@ use crate::activity_view::ActivityView;
 use crate::connections::ConnectionForm;
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
-use crate::query_tab::QueryTab;
+use crate::query_tab::{QueryTab, RowLimitChanged};
 use crate::schema_tree::{Category, Row, SchemaTree};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
@@ -201,10 +201,15 @@ impl Workspace {
                         SharedIndex::default(),
                         history.clone(),
                         snippets.clone(),
+                        settings.query_row_limit,
                         window,
                         cx,
                     )
                 });
+                cx.subscribe(&tab, |this, _, ev: &RowLimitChanged, cx| {
+                    this.set_row_limit(ev.0, cx)
+                })
+                .detach();
                 if !text.is_empty() {
                     tab.update(cx, |t, cx| t.set_text(text, window, cx));
                 }
@@ -694,16 +699,22 @@ impl Workspace {
             self.history.clone(),
             self.snippets.clone(),
         );
+        let limit = self.settings.query_row_limit;
         let tab = cx.new(|cx| {
             QueryTab::new(
                 runtime,
                 SharedIndex::default(),
                 history,
                 snippets,
+                limit,
                 window,
                 cx,
             )
         });
+        cx.subscribe(&tab, |this, _, ev: &RowLimitChanged, cx| {
+            this.set_row_limit(ev.0, cx)
+        })
+        .detach();
         self.bind_query(&tab, focused, cx);
         self.tabs.push(TabKind::Query(tab.clone(), self.next_query));
         self.next_query += 1;
@@ -1048,6 +1059,22 @@ impl Workspace {
             Ok(()) => cx.quit(),
             Err(e) => {
                 window.push_notification(Notification::error(format!("Couldn't restart: {e}")), cx)
+            }
+        }
+    }
+
+    /// Remembers a new row limit and gives it to every query tab.
+    fn set_row_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
+        let limit = pgroove_core::settings::clamp_row_limit(limit);
+        self.settings.query_row_limit = limit;
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            log::warn!("could not save settings: {e:#}");
+        }
+        for t in &self.tabs {
+            if let TabKind::Query(q, _) = t {
+                q.update(cx, |q, cx| q.apply_limit(limit, cx));
             }
         }
     }
