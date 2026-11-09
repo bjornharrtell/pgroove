@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +54,11 @@ impl Status {
 }
 
 actions!(workspace, [OpenPalette]);
+
+enum SidebarItem {
+    Connection(usize, ConnectionProfile),
+    Tree(usize, Row),
+}
 
 enum TabKind {
     Query(Entity<QueryTab>, usize),
@@ -808,188 +814,52 @@ impl Workspace {
             .pl(px(10. + depth as f32 * 14.))
             .pr_2()
             .h(px(26.))
+            .flex_shrink_0()
             .items_center()
             .text_sm()
             .text_color(cx.theme().sidebar_foreground)
             .overflow_hidden()
     }
 
-    fn render_tree_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_tree_item(&self, i: usize, row: Row, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let hover = cx.theme().sidebar_accent;
         let this = cx.entity();
-        self.tree
-            .rows()
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| match row {
-                Row::Database { name, current } => {
-                    let target = name.clone();
-                    let mut row = self
-                        .tree_row(("database", i), 1, cx)
-                        .child(
-                            Icon::new(if current {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size_4()
-                            .text_color(muted),
-                        )
-                        .child(Icon::new(IconName::Database).size_4().text_color(muted))
-                        .child(div().truncate().child(name));
-                    if current {
-                        row = row.font_weight(FontWeight::MEDIUM);
-                    } else {
-                        row = row
-                            .cursor_pointer()
-                            .hover(move |d| d.bg(hover))
-                            .tooltip(|window, cx| {
-                                Tooltip::new("Connect to this database").build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.switch_database(target.clone(), cx)
-                            }));
-                    }
-                    row.into_any_element()
-                }
-                Row::Schema { name, expanded } => {
-                    let n = name.clone();
-                    let (refresh_this, copy_name) = (this.clone(), name.clone());
-                    self.tree_row(("schema", i), 2, cx)
+        match row {
+            Row::Database { name, current } => {
+                let target = name.clone();
+                let mut row = self
+                    .tree_row(("database", i), 1, cx)
+                    .child(
+                        Icon::new(if current {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size_4()
+                        .text_color(muted),
+                    )
+                    .child(Icon::new(IconName::Database).size_4().text_color(muted))
+                    .child(div().truncate().child(name));
+                if current {
+                    row = row.font_weight(FontWeight::MEDIUM);
+                } else {
+                    row = row
                         .cursor_pointer()
                         .hover(move |d| d.bg(hover))
-                        .child(
-                            Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size_4()
-                            .text_color(muted),
-                        )
-                        .child(Icon::new(IconName::Folder).size_4().text_color(muted))
-                        .child(name)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)),
-                        )
-                        .context_menu(move |menu, _, _| {
-                            let (t, copy) = (refresh_this.clone(), copy_name.clone());
-                            menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
-                                t.update(cx, |ws, cx| ws.refresh_tree(cx))
-                            }))
-                            .item(
-                                PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                                }),
-                            )
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Connect to this database").build(window, cx)
                         })
-                        .into_any_element()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switch_database(target.clone(), cx)
+                        }));
                 }
-                Row::Object { schema, name, kind } => {
-                    let icon = match kind {
-                        ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
-                        ObjectKind::Sequence => IconName::Hash,
-                        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Aggregate => {
-                            IconName::Braces
-                        }
-                        ObjectKind::EnumType
-                        | ObjectKind::CompositeType
-                        | ObjectKind::DomainType => IconName::Type,
-                        _ => IconName::Table,
-                    };
-                    let has_definition = matches!(
-                        kind,
-                        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::EnumType
-                    );
-                    let (s, n) = (schema.clone(), name.clone());
-                    let ctx_this = this.clone();
-                    let row = self
-                        .tree_row(("object", i), 4, cx)
-                        .child(Icon::new(icon).size_4().text_color(muted))
-                        .child(name.clone())
-                        .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
-                    let row = if kind.is_relation() {
-                        let table = TableRef::new(schema.clone(), name.clone());
-                        row.cursor_pointer()
-                            .hover(move |d| d.bg(hover))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_table(table.clone(), window, cx)
-                            }))
-                    } else if has_definition {
-                        row.cursor_pointer()
-                            .hover(move |d| d.bg(hover))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.show_definition(s.clone(), n.clone(), kind, window, cx)
-                            }))
-                    } else {
-                        row
-                    };
-                    let (s, n) = (schema.clone(), name.clone());
-                    row.context_menu(move |menu, _, _| {
-                        let qualified = format!(
-                            "{}.{}",
-                            pgroove_core::data::quote_ident(&s),
-                            pgroove_core::data::quote_ident(&n)
-                        );
-                        let table = TableRef::new(s.clone(), n.clone());
-                        let mut menu = menu;
-                        if kind.is_relation() {
-                            let (t1, t2, t3, tb1, tb2, q) = (
-                                ctx_this.clone(),
-                                ctx_this.clone(),
-                                ctx_this.clone(),
-                                table.clone(),
-                                table.clone(),
-                                qualified.clone(),
-                            );
-                            menu = menu
-                                .item(PopupMenuItem::new("Open data").on_click(
-                                    move |_, window, cx| {
-                                        t1.update(cx, |ws, cx| {
-                                            ws.open_table(tb1.clone(), window, cx)
-                                        })
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("Open structure").on_click(
-                                    move |_, window, cx| {
-                                        t2.update(cx, |ws, cx| {
-                                            ws.open_structure(tb2.clone(), window, cx)
-                                        })
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("Select first 100 rows").on_click(
-                                    move |_, window, cx| {
-                                        let sql = format!("select * from {q} limit 100;");
-                                        t3.update(cx, |ws, cx| {
-                                            ws.append_to_editor(&sql, window, cx)
-                                        })
-                                    },
-                                ));
-                        }
-                        if has_definition {
-                            let (t, s2, n2) = (ctx_this.clone(), s.clone(), n.clone());
-                            menu = menu.item(PopupMenuItem::new("Show definition").on_click(
-                                move |_, window, cx| {
-                                    t.update(cx, |ws, cx| {
-                                        ws.show_definition(s2.clone(), n2.clone(), kind, window, cx)
-                                    })
-                                },
-                            ));
-                        }
-                        let copy = if kind.is_relation() {
-                            qualified
-                        } else {
-                            n.clone()
-                        };
-                        menu.item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                        }))
-                    })
-                    .into_any_element()
-                }
-                Row::ExtensionsHeader { expanded, count } => self
-                    .tree_row(("extensions", i), 2, cx)
+                row.into_any_element()
+            }
+            Row::Schema { name, expanded } => {
+                let n = name.clone();
+                let (refresh_this, copy_name) = (this.clone(), name.clone());
+                self.tree_row(("schema", i), 2, cx)
                     .cursor_pointer()
                     .hover(move |d| d.bg(hover))
                     .child(
@@ -1001,30 +871,223 @@ impl Workspace {
                         .size_4()
                         .text_color(muted),
                     )
-                    .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
-                    .child(format!("Extensions ({})", count.unwrap_or(0)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.tree.toggle_extensions();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                Row::Extension { name, version } => self
-                    .tree_row(("extension", i), 4, cx)
-                    .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
+                    .child(Icon::new(IconName::Folder).size_4().text_color(muted))
                     .child(name)
-                    .child(div().text_xs().text_color(muted).child(version))
-                    .into_any_element(),
-                Row::Message(m) => div()
-                    .pl(px(66.))
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(m)
-                    .into_any_element(),
-            })
-            .collect()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_schema(n.clone(), cx)))
+                    .context_menu(move |menu, _, _| {
+                        let (t, copy) = (refresh_this.clone(), copy_name.clone());
+                        menu.item(
+                            PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
+                                t.update(cx, |ws, cx| ws.refresh_tree(cx))
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                        }))
+                    })
+                    .into_any_element()
+            }
+            Row::Object { schema, name, kind } => {
+                let icon = match kind {
+                    ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
+                    ObjectKind::Sequence => IconName::Hash,
+                    ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Aggregate => {
+                        IconName::Braces
+                    }
+                    ObjectKind::EnumType | ObjectKind::CompositeType | ObjectKind::DomainType => {
+                        IconName::Type
+                    }
+                    _ => IconName::Table,
+                };
+                let has_definition = matches!(
+                    kind,
+                    ObjectKind::Function | ObjectKind::Procedure | ObjectKind::EnumType
+                );
+                let (s, n) = (schema.clone(), name.clone());
+                let ctx_this = this.clone();
+                let row = self
+                    .tree_row(("object", i), 4, cx)
+                    .child(Icon::new(icon).size_4().text_color(muted))
+                    .child(name.clone())
+                    .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
+                let row = if kind.is_relation() {
+                    let table = TableRef::new(schema.clone(), name.clone());
+                    row.cursor_pointer()
+                        .hover(move |d| d.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_table(table.clone(), window, cx)
+                        }))
+                } else if has_definition {
+                    row.cursor_pointer()
+                        .hover(move |d| d.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_definition(s.clone(), n.clone(), kind, window, cx)
+                        }))
+                } else {
+                    row
+                };
+                let (s, n) = (schema.clone(), name.clone());
+                row.context_menu(move |menu, _, _| {
+                    let qualified = format!(
+                        "{}.{}",
+                        pgroove_core::data::quote_ident(&s),
+                        pgroove_core::data::quote_ident(&n)
+                    );
+                    let table = TableRef::new(s.clone(), n.clone());
+                    let mut menu = menu;
+                    if kind.is_relation() {
+                        let (t1, t2, t3, tb1, tb2, q) = (
+                            ctx_this.clone(),
+                            ctx_this.clone(),
+                            ctx_this.clone(),
+                            table.clone(),
+                            table.clone(),
+                            qualified.clone(),
+                        );
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new("Open data").on_click(move |_, window, cx| {
+                                    t1.update(cx, |ws, cx| ws.open_table(tb1.clone(), window, cx))
+                                }),
+                            )
+                            .item(PopupMenuItem::new("Open structure").on_click(
+                                move |_, window, cx| {
+                                    t2.update(cx, |ws, cx| {
+                                        ws.open_structure(tb2.clone(), window, cx)
+                                    })
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Select first 100 rows").on_click(
+                                move |_, window, cx| {
+                                    let sql = format!("select * from {q} limit 100;");
+                                    t3.update(cx, |ws, cx| ws.append_to_editor(&sql, window, cx))
+                                },
+                            ));
+                    }
+                    if has_definition {
+                        let (t, s2, n2) = (ctx_this.clone(), s.clone(), n.clone());
+                        menu = menu.item(PopupMenuItem::new("Show definition").on_click(
+                            move |_, window, cx| {
+                                t.update(cx, |ws, cx| {
+                                    ws.show_definition(s2.clone(), n2.clone(), kind, window, cx)
+                                })
+                            },
+                        ));
+                    }
+                    let copy = if kind.is_relation() {
+                        qualified
+                    } else {
+                        n.clone()
+                    };
+                    menu.item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                    }))
+                })
+                .into_any_element()
+            }
+            Row::ExtensionsHeader { expanded, count } => self
+                .tree_row(("extensions", i), 2, cx)
+                .cursor_pointer()
+                .hover(move |d| d.bg(hover))
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_4()
+                    .text_color(muted),
+                )
+                .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
+                .child(format!("Extensions ({})", count.unwrap_or(0)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tree.toggle_extensions();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Row::Extension { name, version } => self
+                .tree_row(("extension", i), 4, cx)
+                .child(Icon::new(IconName::Puzzle).size_4().text_color(muted))
+                .child(name)
+                .child(div().text_xs().text_color(muted).child(version))
+                .into_any_element(),
+            Row::Message(m) => div()
+                .pl(px(66.))
+                .h(px(26.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(muted)
+                .child(m)
+                .into_any_element(),
+        }
+    }
+
+    fn connection_row(&self, i: usize, p: ConnectionProfile, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let active = match &self.status {
+            Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
+            _ => None,
+        };
+        let is_active = active.as_deref() == Some(p.name.as_str());
+        let connected = is_active && self.client.is_some();
+        let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
+        let hover = theme.sidebar_accent;
+        self.tree_row(("conn", i), 0, cx)
+            .gap_1()
+            .cursor_pointer()
+            .hover(move |d| d.bg(hover))
+            .when(is_active, |d| d.bg(theme.sidebar_accent))
+            .child(
+                Icon::new(if connected {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size_4()
+                .text_color(theme.muted_foreground),
+            )
+            .child(
+                Icon::new(IconName::Server)
+                    .size_4()
+                    .text_color(if connected {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    }),
+            )
+            .child(div().flex_1().truncate().child(p.name.clone()))
+            .child(
+                Button::new(("edit", i))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Settings)
+                    .tooltip("Edit connection")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_form(Some(pe.clone()), window, cx)
+                    })),
+            )
+            .child(
+                Button::new(("delete", i))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Trash)
+                    .tooltip("Delete connection")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.delete(&pd, cx)
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if is_active {
+                    this.disconnect(cx)
+                } else {
+                    this.connect(pc.clone(), cx)
+                }
+            }))
+            .into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1033,82 +1096,46 @@ impl Workspace {
             Status::Connected { name, .. } | Status::Connecting(name) => Some(name.clone()),
             _ => None,
         };
-        let mut items: Vec<AnyElement> = Vec::new();
+        let mut items: Vec<SidebarItem> = Vec::new();
         for (i, p) in self.store.profiles().iter().cloned().enumerate() {
             let is_active = active.as_deref() == Some(p.name.as_str());
-            let connected = is_active && self.client.is_some();
-            let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
-            let hover = theme.sidebar_accent;
-            items.push(
-                self.tree_row(("conn", i), 0, cx)
-                    .gap_1()
-                    .cursor_pointer()
-                    .hover(move |d| d.bg(hover))
-                    .when(is_active, |d| d.bg(theme.sidebar_accent))
-                    .child(
-                        Icon::new(if connected {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        Icon::new(IconName::Server)
-                            .size_4()
-                            .text_color(if connected {
-                                theme.success
-                            } else {
-                                theme.muted_foreground
-                            }),
-                    )
-                    .child(div().flex_1().truncate().child(p.name.clone()))
-                    .child(
-                        Button::new(("edit", i))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Settings)
-                            .tooltip("Edit connection")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_form(Some(pe.clone()), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("delete", i))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Trash)
-                            .tooltip("Delete connection")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.delete(&pd, cx)
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if is_active {
-                            this.disconnect(cx)
-                        } else {
-                            this.connect(pc.clone(), cx)
-                        }
-                    }))
-                    .into_any_element(),
-            );
+            items.push(SidebarItem::Connection(i, p));
             if is_active {
-                items.extend(self.render_tree_rows(cx));
+                items.extend(
+                    self.tree
+                        .rows()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(j, r)| SidebarItem::Tree(j, r)),
+                );
             }
         }
-        if items.is_empty() {
-            items.push(
-                div()
-                    .p_3()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Add a connection to get started.")
-                    .into_any_element(),
-            );
-        }
+        let empty = items.is_empty();
+        let items = Rc::new(items);
+        let count = items.len();
+        let list = uniform_list(
+            "sidebar-rows",
+            count,
+            cx.processor(move |this, range: Range<usize>, _, cx| {
+                range
+                    .map(|ix| match &items[ix] {
+                        SidebarItem::Connection(i, p) => this.connection_row(*i, p.clone(), cx),
+                        SidebarItem::Tree(j, r) => this.render_tree_item(*j, r.clone(), cx),
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .size_full();
+        let body = if empty {
+            div()
+                .p_3()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("Add a connection to get started.")
+                .into_any_element()
+        } else {
+            list.into_any_element()
+        };
         v_flex()
             .w(px(260.))
             .flex_shrink_0()
@@ -1151,13 +1178,7 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(
-                v_flex()
-                    .id("sidebar-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .children(items),
-            )
+            .child(div().flex_1().min_h_0().child(body))
     }
 
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
