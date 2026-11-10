@@ -10,6 +10,7 @@ use pgroove_ui::{Startup, Workspace};
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    pgroove_core::integrate::integrate_current();
     let runtime = Arc::new(tokio::runtime::Runtime::new()?);
     let path = ProfileStore::default_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
     let store = ProfileStore::load(path)?;
@@ -41,6 +42,8 @@ fn main() -> anyhow::Result<()> {
                 window_background: WindowBackgroundAppearance::Transparent,
                 window_min_size: Some(size(px(MIN_WINDOW.0), px(MIN_WINDOW.1))),
                 window_decorations: Some(WindowDecorations::Client),
+                // Matches the launcher entry, so the dock shows the right icon and name.
+                app_id: Some(pgroove_core::integrate::APP_ID.into()),
                 ..TitleBar::window_options()
             };
             // Center the native window buttons in the 36px bar.

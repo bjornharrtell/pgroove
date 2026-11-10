@@ -8,3 +8,4 @@ Icon=pgroove
 Terminal=false
 Categories=Development;Database;
 Keywords=postgres;postgresql;sql;database;
+StartupWMClass=pgroove

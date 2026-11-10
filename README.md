@@ -43,7 +43,9 @@ The macOS app is not signed or notarized, so Gatekeeper blocks the first launch:
 Applications, then right-click it and choose Open (or run
 `xattr -d com.apple.quarantine /Applications/pgroove.app`).
 
-The AppImage relies on the system's graphics libraries (Vulkan, Wayland or X11); make it executable and run it:
+The AppImage relies on the system's graphics libraries (Vulkan, Wayland or X11); make it executable and run it. On first start it installs a launcher entry and icon under
+`~/.local/share` (set `PGROOVE_NO_INTEGRATION=1` to skip), so it appears in menus and can be
+pinned to a dock:
 
 ```bash
 chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
