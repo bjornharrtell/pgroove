@@ -1755,14 +1755,21 @@ impl Workspace {
                 },
             )
         };
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let form_ok = form.clone();
             let this = this.clone();
             let original_name = original_name.clone();
             dialog
                 .title(title)
                 .w(px(420.))
-                .child(form.render(cx, test.clone()))
+                .child(
+                    // Scrolls when the window is too short for the whole form.
+                    div()
+                        .id("connection-form")
+                        .max_h(window.viewport_size().height - px(220.))
+                        .overflow_y_scroll()
+                        .child(form.render(cx, test.clone())),
+                )
                 .actions("Save", true, move |_, window, cx| {
                     let values = form_ok.values(cx);
                     let result = values
@@ -2543,6 +2550,7 @@ impl Workspace {
             .child(
                 div()
                     .id("sidebar-list")
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     // Clicking the tree gives it keyboard focus (the search box keeps its own).
@@ -2553,7 +2561,14 @@ impl Workspace {
                             cx.notify();
                         }),
                     )
-                    .child(body),
+                    .child(body)
+                    // The list scrolls with the wheel; the bar shows how much there is.
+                    .when(!empty, |d| {
+                        d.child(
+                            gpui_kit::component::scroll::Scrollbar::vertical(&self.sidebar_scroll)
+                                .viewport_from_layout(),
+                        )
+                    }),
             )
     }
 
