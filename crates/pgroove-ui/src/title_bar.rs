@@ -92,7 +92,10 @@ pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -
                 .pr_4()
                 .child(content),
         )
-        .when(client_decorated && cfg!(target_os = "linux"), |d| {
-            d.child(close_button(cx))
-        })
+        // Linux draws its own frame under client decorations; Windows has no frame at all once the
+        // native title bar is hidden. macOS keeps its native window buttons.
+        .when(
+            cfg!(target_os = "windows") || (client_decorated && cfg!(target_os = "linux")),
+            |d| d.child(close_button(cx)),
+        )
 }
