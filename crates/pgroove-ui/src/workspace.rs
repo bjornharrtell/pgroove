@@ -2403,18 +2403,14 @@ impl Workspace {
         // Looks like an accordion header (title left, chevron right, ruled between groups);
         // the rows stay in the virtualized list, which an accordion's content could not be.
         // The list assumes every row is the same height, so the header keeps that height; a
-        // full-width tinted strip sets it apart, and a 1px gap above it separates adjacent
-        // headers.
+        // full-width tinted strip sets it apart.
         div()
             .h(px(ROW_HEIGHT))
             .flex_shrink_0()
-            .flex()
-            .items_end()
             .child(
                 h_flex()
                     .id(("group", ix))
-                    .w_full()
-                    .h(px(ROW_HEIGHT - 1.))
+                    .size_full()
                     .px_3()
                     .gap_2()
                     .items_center()
