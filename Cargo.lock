@@ -4971,8 +4971,10 @@ dependencies = [
 name = "pgroove-core"
 version = "0.5.6"
 dependencies = [
+ "aes",
  "anyhow",
  "apple-native-keyring-store",
+ "cbc",
  "dbus-secret-service-keyring-store",
  "dirs 7.0.0",
  "flate2",

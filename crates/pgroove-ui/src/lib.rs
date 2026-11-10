@@ -2,6 +2,7 @@
 
 mod activity_view;
 mod connections;
+mod dbeaver_dialog;
 mod dialogs;
 mod grid_pane;
 mod mode;

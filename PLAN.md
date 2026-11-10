@@ -52,9 +52,9 @@ Key decisions:
 9. **M8 – Server monitoring (done: sessions with cancel/terminate, blocking, statements, databases, tables, replication, settings; auto-refresh):** `pg_stat_activity` (cancel/terminate), locks/blocking tree, `pg_stat_statements` top queries, replication, DB/table sizes, settings browser.
 10. **M9 – Polish (done: command palette, keybinding config, session restore, packaging workflow, README):** command palette, keybindings config, session restore, packaging (Linux/macOS/Windows), docs.
 
-## Planned: import from DBeaver
+## DBeaver import (done)
 
-Not implemented. Feasible as one core module plus one UI action.
+Implemented in `pgroove-core::import_dbeaver` plus a dialog, offered once at startup and from the palette. The notes below are the original plan.
 
 - **Source:** a DBeaver project's `.dbeaver/` folder (`~/.local/share/DBeaverData/workspace6/<project>/` on Linux, `~/Library/DBeaverData/…` on macOS, `%APPDATA%\DBeaverData\…` on Windows).
   - `data-sources.json`: plain JSON with a `connections` map (provider, driver, name, `configuration` host/port/database/url/`configurationType`/`auth-model`, connection `type`) and `folders`.

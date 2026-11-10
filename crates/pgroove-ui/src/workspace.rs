@@ -192,6 +192,8 @@ pub struct Workspace {
     update: UpdateState,
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
+    /// The one-time DBeaver import offer is still to be made (on the first render).
+    dbeaver_offer_pending: bool,
     http: pgroove_core::update::HttpClient,
     /// Search box above the schema tree.
     tree_filter: Entity<InputState>,
@@ -225,6 +227,7 @@ impl Workspace {
             settings,
             settings_path,
         } = startup;
+        let dbeaver_offer_pending = !settings.dbeaver_import_offered;
         let (sidebar_width, editor_height) = (
             session.sidebar_width_or_default(),
             session.editor_height_or_default(),
@@ -320,6 +323,7 @@ impl Workspace {
             pending_activity: session.activity.clone(),
             pending_expanded: session.expanded.clone(),
             collapsed_groups: session.collapsed_groups.iter().cloned().collect(),
+            dbeaver_offer_pending,
             pending_active: session.active.clone(),
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::new(),
@@ -1174,6 +1178,7 @@ impl Workspace {
             }
             RefreshTree => self.refresh_all(cx),
             NewConnection => self.open_form(None, window, cx),
+            ImportDbeaver => self.offer_dbeaver_import(false, window, cx),
             Connect(name) => {
                 if let Some(p) = self
                     .store
@@ -1600,6 +1605,81 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Offers to import connections from DBeaver. At startup (`first_time`) it only asks when
+    /// something new was found, and never again afterwards; from the palette it always reports.
+    fn offer_dbeaver_import(
+        &mut self,
+        first_time: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = pgroove_core::import_dbeaver::detect();
+        let candidates =
+            pgroove_core::import_dbeaver::only_new(found.candidates, self.store.profiles());
+        if candidates.is_empty() {
+            if !first_time {
+                window.push_notification("No new DBeaver connections found to import", cx);
+            }
+            return;
+        }
+        if first_time {
+            self.settings.dbeaver_import_offered = true;
+            self.save_settings();
+        }
+        let state = cx.new(|_| crate::dbeaver_dialog::ImportState::new(candidates));
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let (state, this) = (state.clone(), this.clone());
+            dialog
+                .title("Import from DBeaver")
+                .w(px(520.))
+                .child(crate::dbeaver_dialog::render(&state, cx))
+                .actions("Import", true, move |_, window, cx| {
+                    let picks = state.read(cx).picks();
+                    let (done, errors) = this.update(cx, |ws, cx| {
+                        let r = ws.import_connections(picks);
+                        cx.notify();
+                        r
+                    });
+                    let message = format!(
+                        "Imported {done} connection{}",
+                        if done == 1 { "" } else { "s" }
+                    );
+                    if errors.is_empty() {
+                        window.push_notification(message, cx);
+                    } else {
+                        window.push_notification(
+                            Notification::error(format!("{message}; {}", errors.join("; "))),
+                            cx,
+                        );
+                    }
+                    true
+                })
+        });
+    }
+
+    /// Saves imported connections (and their passwords); returns how many went in and what failed.
+    fn import_connections(
+        &mut self,
+        picks: Vec<pgroove_core::import_dbeaver::Candidate>,
+    ) -> (usize, Vec<String>) {
+        let (mut done, mut errors) = (0, Vec::new());
+        for c in picks {
+            let name = c.profile.name.clone();
+            if let Err(e) = self.store.upsert(None, c.profile) {
+                errors.push(format!("{name}: {e:#}"));
+                continue;
+            }
+            done += 1;
+            if let Some(pw) = c.password
+                && let Err(e) = self.secrets.set(&name, &pw)
+            {
+                errors.push(format!("{name}: password not saved ({e:#})"));
+            }
+        }
+        (done, errors)
     }
 
     fn open_form(
@@ -2778,6 +2858,12 @@ impl Render for Workspace {
         let size = window.bounds().size;
         self.window_size = Some((f32::from(size.width), f32::from(size.height)));
         self.restore_pending(window, cx);
+        if std::mem::take(&mut self.dbeaver_offer_pending) {
+            // Opening a dialog while rendering would not show it, so do it right after.
+            cx.defer_in(window, |this, window, cx| {
+                this.offer_dbeaver_import(true, window, cx)
+            });
+        }
         let (left, right) = match self.focused_session(cx).and_then(|id| self.session(id)) {
             Some(s) => match &s.status {
                 SessionStatus::Ready { version } => (

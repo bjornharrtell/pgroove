@@ -67,6 +67,9 @@ pub struct Settings {
     /// Theme used when the appearance is dark (or the system is dark).
     #[serde(default = "default_dark")]
     pub dark_theme: String,
+    /// The one-time offer to import DBeaver connections has been shown.
+    #[serde(default)]
+    pub dbeaver_import_offered: bool,
 }
 
 fn default_light() -> String {
@@ -94,6 +97,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             light_theme: default_light(),
             dark_theme: default_dark(),
+            dbeaver_import_offered: false,
         }
     }
 }
@@ -152,6 +156,7 @@ mod tests {
             appearance: Appearance::Dark,
             light_theme: "My Light".into(),
             dark_theme: "Catppuccin Frappe".into(),
+            dbeaver_import_offered: true,
         };
         off.save(&path).unwrap();
         assert_eq!(Settings::load(&path), off);

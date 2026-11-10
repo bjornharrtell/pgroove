@@ -16,6 +16,7 @@ pub enum PaletteCommand {
     OpenActivity,
     RefreshTree,
     NewConnection,
+    ImportDbeaver,
     Connect(String),
     Disconnect,
     CheckUpdates,
@@ -110,7 +111,14 @@ pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup>
             entries: server,
         },
     ];
-    let mut conns = vec![entry(NewConnection, "New connection…", &["add"])];
+    let mut conns = vec![
+        entry(NewConnection, "New connection…", &["add"]),
+        entry(
+            ImportDbeaver,
+            "Import connections from DBeaver…",
+            &["dbeaver", "migrate"],
+        ),
+    ];
     conns.extend(
         connections
             .iter()
@@ -229,7 +237,14 @@ mod tests {
         );
         assert!(!titles(&g, 0).contains(&"Run query"));
         assert_eq!(titles(&g, 1), ["Allow editing (turn off read-only)"]);
-        assert_eq!(titles(&g, 2), ["New connection…", "Connect to a"]);
+        assert_eq!(
+            titles(&g, 2),
+            [
+                "New connection…",
+                "Import connections from DBeaver…",
+                "Connect to a"
+            ]
+        );
     }
 
     #[test]
@@ -240,7 +255,10 @@ mod tests {
         assert!(titles(&g, 1).contains(&"Open activity monitor"));
         assert!(titles(&g, 1).contains(&"Disconnect"));
         assert_eq!(titles(&g, 1)[0], "Block writes (turn on read-only)");
-        assert_eq!(titles(&g, 2), ["New connection…"]);
+        assert_eq!(
+            titles(&g, 2),
+            ["New connection…", "Import connections from DBeaver…"]
+        );
         assert_eq!(
             titles(&g, 4),
             [
@@ -276,8 +294,9 @@ mod tests {
     fn lookup_by_position() {
         let g = groups(&["x".to_string()], &ctx(true, true, false, true));
         assert_eq!(command_at(&g, 0, 0), Some(PaletteCommand::NewQuery));
+        assert_eq!(command_at(&g, 2, 1), Some(PaletteCommand::ImportDbeaver));
         assert_eq!(
-            command_at(&g, 2, 1),
+            command_at(&g, 2, 2),
             Some(PaletteCommand::Connect("x".into()))
         );
         assert_eq!(command_at(&g, 9, 0), None);

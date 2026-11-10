@@ -9,6 +9,7 @@ pub mod explain;
 pub mod export;
 pub mod format;
 pub mod history;
+pub mod import_dbeaver;
 pub mod integrate;
 pub mod keys;
 pub mod monitor;
