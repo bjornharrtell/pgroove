@@ -13,6 +13,12 @@ use pgroove_core::query;
 use pgroove_core::query::ResultSet;
 
 use crate::results::ResultsTable;
+use crate::selection::Mods;
+
+actions!(
+    result_grid,
+    [CopyCells, CopyCellsWithHeaders, SelectAllCells]
+);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Format {
@@ -74,7 +80,22 @@ impl GridPane {
         let edit_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Value"));
         let subs = vec![
             cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
+                // A row header click marks the whole row (Shift extends, Ctrl/Cmd adds).
+                if let TableEvent::SelectRow(r) = ev {
+                    let m = window.modifiers();
+                    let mods = Mods {
+                        extend: m.shift,
+                        add: m.secondary(cx),
+                    };
+                    this.grid.update(cx, |g, cx| {
+                        let cols = g.delegate().names().len();
+                        g.delegate_mut().selection_mut().select_row(*r, cols, mods);
+                        cx.notify();
+                    });
+                }
                 if let TableEvent::SelectCell(r, c) = ev {
+                    this.grid
+                        .update(cx, |g, _| g.delegate_mut().cell_selected((*r, *c)));
                     this.selected = Some((*r, *c));
                     this.refresh_inspected(cx);
                     if this.editable && this.inspected.as_ref().is_some_and(|i| i.can_edit) {
@@ -150,6 +171,42 @@ impl GridPane {
 
     pub fn selected(&self) -> Option<(usize, usize)> {
         self.selected
+    }
+
+    /// The rows touched by the marked cells, or else the row of the selected cell.
+    pub fn selected_rows(&self, cx: &App) -> Vec<usize> {
+        let marked = self.grid.read(cx).delegate().selection().rows();
+        if marked.is_empty() {
+            self.selected.map(|(r, _)| r).into_iter().collect()
+        } else {
+            marked.into_iter().collect()
+        }
+    }
+
+    /// Copies the marked cells (or the selected cell) as tab-separated text.
+    fn copy_cells(&mut self, headers: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let copied = {
+            let t = self.grid.read(cx).delegate();
+            t.copy_text(headers).or_else(|| {
+                let (r, c) = self.selected?;
+                t.cell(r, c).map(|v| (v.to_string(), 1))
+            })
+        };
+        if let Some((text, count)) = copied {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            window.push_notification(
+                format!("Copied {count} cell{}", if count == 1 { "" } else { "s" }),
+                cx,
+            );
+        }
+    }
+
+    fn select_all_cells(&mut self, cx: &mut Context<Self>) {
+        self.grid.update(cx, |g, cx| {
+            let (rows, cols) = (g.delegate().row_total(), g.delegate().names().len());
+            g.delegate_mut().selection_mut().select_all(rows, cols);
+            cx.notify();
+        });
     }
 
     pub fn set_editable(&mut self, editable: bool, cx: &mut Context<Self>) {
@@ -343,17 +400,37 @@ impl GridPane {
 
 impl Render for GridPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let on_copy =
+            cx.listener(|this, _: &CopyCells, window, cx| this.copy_cells(false, window, cx));
+        let on_copy_headers = cx.listener(|this, _: &CopyCellsWithHeaders, window, cx| {
+            this.copy_cells(true, window, cx)
+        });
+        let on_select_all =
+            cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all_cells(cx));
         let inspector = self.render_inspector(cx);
         let show_inspector = inspector.is_some();
-        v_resizable("grid-split")
-            .with_state(&self.split)
-            .child(resizable_panel().child(DataTable::new(&self.grid)))
+        let grid = self.grid.clone();
+        div()
+            .size_full()
+            .key_context("ResultGrid")
+            .on_action(on_copy)
+            .on_action(on_copy_headers)
+            .on_action(on_select_all)
+            // A drag that ends outside the cells still ends.
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                grid.update(cx, |g, _| g.delegate_mut().selection_mut().release());
+            })
             .child(
-                resizable_panel()
-                    .size(px(160.))
-                    .size_range(px(70.)..px(900.))
-                    .visible(show_inspector)
-                    .children(inspector),
+                v_resizable("grid-split")
+                    .with_state(&self.split)
+                    .child(resizable_panel().child(DataTable::new(&self.grid)))
+                    .child(
+                        resizable_panel()
+                            .size(px(160.))
+                            .size_range(px(70.)..px(900.))
+                            .visible(show_inspector)
+                            .children(inspector),
+                    ),
             )
     }
 }

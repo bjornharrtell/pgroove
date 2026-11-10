@@ -153,14 +153,24 @@ impl TableView {
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some((row, _)) = self.pane.read(cx).selected() {
-            self.notice = None;
-            self.pane
-                .update(cx, |p, cx| p.edit_session(cx, |s| s.toggle_delete(row)));
-        } else {
+        let rows = self.pane.read(cx).selected_rows(cx);
+        if rows.is_empty() {
             self.notice = Some(("Select a cell in the row first.".into(), true));
             cx.notify();
+            return;
         }
+        self.notice = None;
+        self.pane.update(cx, |p, cx| {
+            p.edit_session(cx, |s| {
+                // Delete every marked row; if they are all deleted already, bring them back.
+                let restore = rows.iter().all(|r| s.is_deleted(*r));
+                for r in rows {
+                    if s.is_deleted(r) == restore {
+                        s.toggle_delete(r);
+                    }
+                }
+            })
+        });
     }
 
     /// Opens the new-row dialog filled with the selected row's values.

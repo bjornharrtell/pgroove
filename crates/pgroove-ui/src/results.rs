@@ -6,6 +6,8 @@ use gpui_kit::*;
 use pgroove_core::edit::EditSession;
 use pgroove_core::query::ResultSet;
 
+use crate::selection::{CellSelection, Mods};
+
 /// Characters of a cell drawn in the grid; the rest is in the inspector.
 const MAX_CELL_CHARS: usize = 300;
 
@@ -55,6 +57,11 @@ pub struct ResultsTable {
     pending_sort: Option<Option<(usize, bool)>>,
     /// Staged edits; when present, cells are read through it.
     session: Option<EditSession>,
+    /// The cells the user has marked (drag, Shift, Ctrl/Cmd).
+    selection: CellSelection,
+    /// A mouse press just changed the selection; the click's `SelectCell` event that follows
+    /// must not reset it (only keyboard moves should).
+    press_pending: bool,
 }
 
 impl ResultsTable {
@@ -64,6 +71,42 @@ impl ResultsTable {
             sortable: true,
             ..Self::default()
         }
+    }
+
+    pub fn selection(&self) -> &CellSelection {
+        &self.selection
+    }
+
+    pub fn selection_mut(&mut self) -> &mut CellSelection {
+        &mut self.selection
+    }
+
+    /// A mouse press on a cell.
+    pub fn press(&mut self, cell: (usize, usize), mods: Mods) {
+        self.selection.press(cell, mods);
+        self.press_pending = true;
+    }
+
+    /// The kit selected a cell. After a press that is the click itself; otherwise the keyboard
+    /// moved, and the selection follows to that single cell.
+    pub fn cell_selected(&mut self, cell: (usize, usize)) {
+        if std::mem::take(&mut self.press_pending) {
+            return;
+        }
+        self.selection.press(cell, Mods::default());
+        self.selection.release();
+    }
+
+    /// The marked cells as tab-separated text and how many there are; `None` when none are.
+    pub fn copy_text(&self, headers: bool) -> Option<(String, usize)> {
+        let count = self.selection.cell_count();
+        (count > 0).then(|| {
+            (
+                self.selection
+                    .to_tsv(|r, c| self.cell(r, c), &self.names, headers),
+                count,
+            )
+        })
     }
 
     pub fn session(&self) -> Option<&EditSession> {
@@ -109,6 +152,7 @@ impl ResultsTable {
         match set {
             Some(s) => {
                 self.session = None;
+                self.selection.clear();
                 self.names = s.columns.clone();
                 self.numeric = (0..s.columns.len())
                     .map(|i| is_numeric(&s.rows, i))
@@ -137,6 +181,7 @@ impl ResultsTable {
             }
             None => {
                 self.session = None;
+                self.selection.clear();
                 self.names.clear();
                 self.columns.clear();
                 self.numeric.clear();
@@ -198,6 +243,7 @@ impl TableDelegate for ResultsTable {
                 )
             });
         let right = self.numeric.get(col_ix).copied().unwrap_or(false);
+        let selected = self.selection.contains(row_ix, col_ix);
         let base = match self.cell(row_ix, col_ix) {
             Some(v) => div()
                 .truncate()
@@ -205,12 +251,39 @@ impl TableDelegate for ResultsTable {
             None => div().italic().opacity(0.5).child("NULL"),
         };
         let base = if right { base.text_right() } else { base };
+        let base = base
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |state, ev: &MouseDownEvent, _, cx| {
+                    let mods = Mods {
+                        extend: ev.modifiers.shift,
+                        add: ev.modifiers.secondary(cx),
+                    };
+                    state.delegate_mut().press((row_ix, col_ix), mods);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |state, ev: &MouseMoveEvent, _, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) {
+                    state.delegate_mut().selection.drag_to((row_ix, col_ix));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|state, _: &MouseUpEvent, _, _| {
+                    state.delegate_mut().selection.release();
+                }),
+            );
         if deleted {
             base.line_through().bg(theme.danger.opacity(0.18))
         } else if inserted {
             base.bg(theme.success.opacity(0.18))
         } else if edited {
             base.bg(theme.warning.opacity(0.22))
+        } else if selected {
+            base.bg(theme.primary.opacity(0.28))
         } else {
             base
         }
@@ -246,5 +319,33 @@ mod tests {
         assert!(!super::is_numeric(&[vec![Some("x".into())]], 0));
         t.set_sorted(Some((0, true)));
         assert_eq!(t.sorted, Some((0, true)));
+    }
+
+    #[test]
+    fn marking_and_copying_cells() {
+        use crate::selection::Mods;
+        let mut t = ResultsTable::default();
+        t.set(Some(&ResultSet {
+            columns: vec!["a".into(), "b".into()],
+            rows: vec![
+                vec![Some("1".into()), Some("x".into())],
+                vec![Some("2".into()), None],
+            ],
+            count: 2,
+            truncated: false,
+        }));
+        assert_eq!(t.copy_text(false), None);
+        t.press((0, 0), Mods::default());
+        t.selection_mut().drag_to((1, 1));
+        t.selection_mut().release();
+        assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\t\n".into(), 4)));
+        // The click's own SelectCell keeps the marked block; a keyboard move collapses it.
+        t.cell_selected((1, 1));
+        assert_eq!(t.selection().cell_count(), 4);
+        t.cell_selected((0, 1));
+        assert_eq!(t.selection().cell_count(), 1);
+        // New data clears the marks.
+        t.set(None);
+        assert_eq!(t.selection().cell_count(), 0);
     }
 }

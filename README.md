@@ -22,7 +22,11 @@ Requires PostgreSQL 13 or newer on the server.
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`
   with a plan tree that marks the hottest node.
 - **Data viewer:** paged (50 to 10 000 rows per page, remembered), server-side sorting, filter expression, copy or save the page as CSV or JSON, **Export all…** to stream the whole table (with the current filter and sort) to a CSV file,
-  cell inspector with pretty-printed JSON.
+  cell inspector with pretty-printed JSON. Select cells freely in any result grid: drag to mark
+  a block, Shift-click to extend it, Ctrl/Cmd-click to add more blocks, click a row number for a
+  whole row, `Ctrl+A` for everything. `Ctrl+C` copies the marked cells as tab-separated text
+  (paste into a spreadsheet) and `Ctrl+Shift+C` adds the column names. Deleting rows in the data
+  viewer acts on every marked row.
 - **Table structure:** columns, constraints (foreign keys are links), indexes, triggers,
   sizes and reconstructed DDL.
 - **Editing:** add, duplicate, change and delete rows in any ordinary table, including tables without a primary key (rows are then matched by physical position and version, and a row changed in the meantime is refused). Edits are staged, you review the generated SQL, and it is applied atomically.

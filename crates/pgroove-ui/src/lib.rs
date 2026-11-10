@@ -11,6 +11,7 @@ mod plan_view;
 mod query_tab;
 mod results;
 mod schema_tree;
+mod selection;
 mod sql_completion;
 mod structure_view;
 mod table_view;
@@ -77,6 +78,23 @@ pub fn init(cx: &mut App) {
         })
         .collect();
     cx.bind_keys(bindings);
+    // Copy and select-all while a result grid has focus.
+    cx.bind_keys([
+        KeyBinding::new("ctrl-c", grid_pane::CopyCells, Some("ResultGrid")),
+        KeyBinding::new("cmd-c", grid_pane::CopyCells, Some("ResultGrid")),
+        KeyBinding::new(
+            "ctrl-shift-c",
+            grid_pane::CopyCellsWithHeaders,
+            Some("ResultGrid"),
+        ),
+        KeyBinding::new(
+            "cmd-shift-c",
+            grid_pane::CopyCellsWithHeaders,
+            Some("ResultGrid"),
+        ),
+        KeyBinding::new("ctrl-a", grid_pane::SelectAllCells, Some("ResultGrid")),
+        KeyBinding::new("cmd-a", grid_pane::SelectAllCells, Some("ResultGrid")),
+    ]);
     // Always a way to leave, whatever the window frame shows.
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([
