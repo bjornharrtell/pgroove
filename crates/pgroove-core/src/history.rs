@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::atomic;
+
 /// Oldest entries are dropped beyond this many.
 pub const MAX_HISTORY: usize = 500;
 
@@ -49,13 +51,7 @@ fn read_text(path: &Path) -> Result<Option<String>> {
 }
 
 fn write_text(path: &Path, text: &str) -> Result<()> {
-    if path.as_os_str().is_empty() {
-        return Ok(());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    atomic::write(path, text.as_bytes())
 }
 
 /// Most recent queries, newest last.
@@ -242,6 +238,11 @@ mod tests {
         let mut h = History::load(&path).unwrap();
         assert!(h.is_empty());
         h.push(entry("select 1", 1)).unwrap();
+        assert!(path.exists(), "the history file is written");
+        assert!(
+            !dir.path().join("sub/h.toml.part").exists(),
+            "no part file is left"
+        );
         h.push(entry("select 2", 2)).unwrap();
         h.push(entry("select 1", 3)).unwrap();
         h.push(entry("   ", 4)).unwrap();
@@ -291,6 +292,10 @@ mod tests {
             .unwrap();
         s.save("top orders", "select 2").unwrap();
         s.save("other", "select 3").unwrap();
+        assert!(
+            !dir.path().join("s.toml.part").exists(),
+            "no part file is left"
+        );
         assert!(s.save("  ", "x").is_err());
         assert!(s.save("n", "  ").is_err());
         let loaded = Snippets::load(&path).unwrap();

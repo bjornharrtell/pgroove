@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::atomic;
 
 /// Which theme variant the app shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -119,11 +121,7 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))
+        atomic::write(path, toml::to_string_pretty(self)?.as_bytes())
     }
 }
 

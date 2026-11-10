@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::ConnectionProfile;
+use crate::{ConnectionProfile, atomic};
 
 #[derive(Default, Serialize, Deserialize)]
 struct File {
@@ -23,15 +23,23 @@ impl ProfileStore {
         dirs::config_dir().map(|d| d.join("pgroove").join("connections.toml"))
     }
 
-    /// Loads the store; a missing file yields an empty store.
+    /// Loads the store; a missing file yields an empty store and an unparseable one is
+    /// moved aside to `<path>.bad` so the app still starts.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let profiles = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str::<File>(&text)
-                    .with_context(|| format!("parsing {}", path.display()))?
-                    .connections
-            }
+            Ok(text) => match toml::from_str::<File>(&text) {
+                Ok(file) => file.connections,
+                Err(e) => {
+                    let bad = set_aside(&path)?;
+                    log::warn!(
+                        "ignoring connections file {}: {e}; moved to {}",
+                        path.display(),
+                        bad.display()
+                    );
+                    Vec::new()
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -81,8 +89,17 @@ impl ProfileStore {
         let text = toml::to_string_pretty(&File {
             connections: self.profiles.clone(),
         })?;
-        std::fs::write(&self.path, text).with_context(|| format!("writing {}", self.path.display()))
+        atomic::write(&self.path, text.as_bytes())
     }
+}
+
+/// Renames `path` to a sibling `<path>.bad`, replacing an older one, and returns it.
+fn set_aside(path: &Path) -> Result<PathBuf> {
+    let bad = atomic::sibling(path, ".bad");
+    let _ = std::fs::remove_file(&bad);
+    std::fs::rename(path, &bad)
+        .with_context(|| format!("moving {} to {}", path.display(), bad.display()))?;
+    Ok(bad)
 }
 
 #[cfg(test)]
@@ -132,10 +149,38 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_errors() {
+    fn corrupt_file_is_moved_aside() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.toml");
+        let bad = dir.path().join("c.toml.bad");
+        std::fs::write(&bad, "older").unwrap();
         std::fs::write(&path, "connection = 3").unwrap();
-        assert!(ProfileStore::load(&path).is_err());
+        let s = ProfileStore::load(&path).unwrap();
+        assert!(s.profiles().is_empty(), "a bad file yields an empty store");
+        assert!(!path.exists(), "the broken file is gone from its place");
+        assert_eq!(
+            std::fs::read_to_string(&bad).unwrap(),
+            "connection = 3",
+            "it replaces an older .bad file"
+        );
+    }
+
+    #[test]
+    fn save_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        let mut s = ProfileStore::load(&path).unwrap();
+        s.upsert(None, p("a")).unwrap();
+        s.upsert(None, p("b")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[connection]]"), "{text}");
+        assert!(!dir.path().join("c.toml.part").exists());
+    }
+
+    #[test]
+    fn unreadable_file_still_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // Reading a directory as a file fails for a reason other than not-found.
+        assert!(ProfileStore::load(dir.path()).is_err());
     }
 }
