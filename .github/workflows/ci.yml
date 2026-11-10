@@ -28,6 +28,58 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Line coverage of the whole workspace, gated so that it cannot slip unnoticed. AGENTS.md asks
+  # for 80% patch coverage on new or changed lines, which a total percentage cannot show, so this
+  # job only holds the total and `packaging/patch-coverage.sh <base-revision>` (see the README,
+  # Development) reports the changed lines locally.
+  # Measured on 5fc4678 without PGROOVE_TEST_PG, so the tests that need a database skip themselves
+  # and the number does not depend on a server: 42.15% of lines (5345 of 12680). The floor sits a
+  # little below it, so toolchain drift does not trip the job; raise it as coverage improves.
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      LINE_COVERAGE_FLOOR: "41"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      # Prebuilt binary instead of `cargo install cargo-llvm-cov`, which would compile it here.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux deps
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
+      - name: Measure line coverage
+        run: |
+          # No --summary-only: that would also strip the per-line detail from the lcov report the
+          # next step gates on and the artifact keeps.
+          cargo llvm-cov --workspace --no-fail-fast --lcov --output-path lcov.info
+      - name: Gate on line coverage
+        run: |
+          # Totals come from the lcov report, so the gate uses the same numbers as the summary.
+          awk -F: -v floor="$LINE_COVERAGE_FLOOR" -v summary="$GITHUB_STEP_SUMMARY" '
+            /^LF:/ { found += $2 }
+            /^LH:/ { hit += $2 }
+            END {
+              percent = found ? 100 * hit / found : 0
+              printf "line coverage: %.2f%% (%d of %d lines), floor %s%%\n", percent, hit, found, floor
+              printf "### Line coverage %.2f%%\n\n| Lines hit | Lines found | Line coverage | Floor |\n| --- | --- | --- | --- |\n| %d | %d | %.2f%% | %s%% |\n", percent, hit, found, percent, floor >> summary
+              if (percent + 0 < floor + 0) {
+                printf "::error::line coverage %.2f%% is below the %s%% floor\n", percent, floor
+                exit 1
+              }
+            }
+          ' lcov.info
+      - name: Upload lcov report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: ignore
+
   # Catches platform-specific breakage before a release: build, lint and run the tests that
   # need no database. (Service containers are only available on Linux runners.)
   portable:

@@ -169,6 +169,31 @@ Layout: `pgroove-core` (no UI: connections, catalog, queries, editing, monitorin
 `pgroove-ui` (gpui views), `pgroove-app` (the binary). The design notes live in
 [PLAN.md](PLAN.md).
 
+### Coverage
+
+CI measures line coverage of the workspace without a database and fails when it drops below the
+floor in the `coverage` job of `.github/workflows/ci.yml` (41%; the revision the floor was set on
+measured 42.15%, and the job writes the number to its step summary and uploads the lcov report).
+The same measurement locally:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov    # or a prebuilt binary, see the CI job
+cargo llvm-cov --workspace --summary-only
+```
+
+AGENTS.md asks for 80% coverage of new or changed lines, which a workspace total cannot show. For
+that, report the changed lines against a base revision:
+
+```bash
+packaging/patch-coverage.sh              # against origin/main
+packaging/patch-coverage.sh main~5       # or any tag, branch or commit
+PATCH_COVERAGE_MIN=80 packaging/patch-coverage.sh   # threshold, this is the default
+```
+
+It runs the tests once, prints the patch coverage and the uncovered changed lines, and exits
+non-zero when the patch is below the threshold. Paths under `crates/` are what it looks at.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
