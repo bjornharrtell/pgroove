@@ -197,15 +197,27 @@ pub fn describe_db_error(db: &DbError) -> String {
     s
 }
 
-/// Runs one or more statements.
+/// Runs one or more statements. A single query (`select`, `with`, `values`, `table`) is fetched
+/// with a `LIMIT` so the server stops after `max_rows + 1` rows; `truncated` means more exist.
+/// Anything else runs as written.
 pub async fn run(client: &Client, sql: &str, max_rows: usize) -> Result<QueryOutput> {
     let start = Instant::now();
-    let messages = client
-        .simple_query(sql)
-        .await
-        .map_err(|e| anyhow::Error::new(QueryError::from_driver(&e)))?;
+    let statements = sqlsplit::split_statements(sql);
+    let sets = match statements.as_slice() {
+        [one] if sqlsplit::is_select_like(&one.text) => {
+            let char_start = sql[..one.start].chars().count();
+            run_one(client, &one.text, max_rows, char_start).await?
+        }
+        _ => {
+            let messages = client
+                .simple_query(sql)
+                .await
+                .map_err(|e| anyhow::Error::new(QueryError::from_driver(&e)))?;
+            collect(messages, max_rows)
+        }
+    };
     Ok(QueryOutput {
-        sets: shared(collect(messages, max_rows)),
+        sets: shared(sets),
         elapsed: start.elapsed(),
         limit: None,
     })
@@ -213,6 +225,11 @@ pub async fn run(client: &Client, sql: &str, max_rows: usize) -> Result<QueryOut
 
 /// Characters of the wrapper that precede the user's statement.
 const WRAP_PREFIX: &str = "select * from (";
+
+/// Wraps a query, asking for one row past `limit` so an extra row reveals more.
+fn wrapped(text: &str, limit: usize) -> String {
+    format!("{WRAP_PREFIX}{text}\n) as _pgroove_q limit {}", limit + 1)
+}
 
 fn shift_position(e: QueryError, remove: usize, add: usize) -> QueryError {
     QueryError {
@@ -247,8 +264,8 @@ async fn run_one(
     char_start: usize,
 ) -> Result<Vec<ResultSet>> {
     if sqlsplit::is_select_like(text) {
-        let wrapped = format!("{WRAP_PREFIX}{text}\n) as _pgroove_q limit {}", limit + 1);
-        match client.simple_query(&wrapped).await {
+        let capped = wrapped(text, limit);
+        match client.simple_query(&capped).await {
             Ok(msgs) => return Ok(apply_limit(collect(msgs, limit + 1), limit)),
             Err(e) if wrapping_not_possible(&e) => {}
             Err(e) => {
@@ -482,6 +499,14 @@ mod tests {
         assert!(collect(vec![SimpleQueryMessage::CommandComplete(2)], 10)[0].count == 2);
     }
 
+    #[test]
+    fn wrapping_fetches_one_row_past_the_limit() {
+        assert_eq!(
+            wrapped("select 1", 9),
+            "select * from (select 1\n) as _pgroove_q limit 10"
+        );
+    }
+
     /// Needs `PGROOVE_TEST_PG` (see `connect` tests).
     #[tokio::test]
     async fn run_live() {
@@ -515,6 +540,111 @@ mod tests {
         assert_eq!(qe.span_in("select * from nope"), Some(14..18));
         client.simple_query("select 1").await.unwrap();
         cancel(&client).await.unwrap();
+    }
+
+    /// Needs `PGROOVE_TEST_PG` (see `connect` tests).
+    #[tokio::test]
+    async fn run_caps_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        // Far more rows than the cap: the server stops early, so only the cap arrives.
+        let o = run(
+            &client,
+            "select g from generate_series(1, 100000) g order by g",
+            5,
+        )
+        .await
+        .unwrap();
+        let set = &o.sets[0];
+        assert_eq!(o.limit, None);
+        assert_eq!((set.rows.len(), set.count, set.truncated), (5, 5, true));
+        assert_eq!(set.rows[4][0].as_deref(), Some("5"));
+        // A query with its own limit is nested, not broken: below the cap it is not cut.
+        let o = run(
+            &client,
+            "select g from generate_series(1, 100) g limit 4",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (o.sets[0].rows.len(), o.sets[0].count, o.sets[0].truncated),
+            (4, 4, false)
+        );
+        // Above the cap it is cut like any other query.
+        let o = run(
+            &client,
+            "select g from generate_series(1, 100) g limit 50",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (o.sets[0].rows.len(), o.sets[0].count, o.sets[0].truncated),
+            (10, 10, true)
+        );
+        // Shapes the wrapper can't hold still run: a data-modifying CTE and `select into`.
+        client
+            .batch_execute(
+                "drop table if exists pg_temp.pgroove_run_d; \
+                 create temp table pgroove_run_d as select g as x from generate_series(1, 10) g",
+            )
+            .await
+            .unwrap();
+        let o = run(
+            &client,
+            "with d as (delete from pg_temp.pgroove_run_d returning x) select * from d",
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (o.sets[0].rows.len(), o.sets[0].count, o.sets[0].truncated),
+            (3, 3, true)
+        );
+        let left: i64 = client
+            .query_one("select count(*) from pg_temp.pgroove_run_d", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(left, 0, "the fallback ran the delete");
+        let o = run(
+            &client,
+            "select g as x into temp table pgroove_run_into from generate_series(1, 3) g",
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o.sets.len(), 1);
+        assert!(o.sets[0].columns.is_empty());
+        let into: i64 = client
+            .query_one("select count(*) from pgroove_run_into", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(into, 3, "the fallback ran select into");
+        // Non-select statements run as written: the server count is kept and rows are cut
+        // client-side, as before.
+        let o = run(
+            &client,
+            "insert into pg_temp.pgroove_run_d select g from generate_series(1, 50) g returning x",
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (o.sets[0].rows.len(), o.sets[0].count, o.sets[0].truncated),
+            (3, 50, true)
+        );
+        // Wrapped errors keep their position relative to the user's text.
+        let sql = "  /* lead */ select * from nope_table";
+        let err = run(&client, sql, 3).await.unwrap_err();
+        let qe = err.downcast_ref::<QueryError>().unwrap();
+        assert_eq!(
+            qe.span_in(sql),
+            Some(sql.find("nope_table").unwrap()..sql.len())
+        );
     }
 
     #[test]
