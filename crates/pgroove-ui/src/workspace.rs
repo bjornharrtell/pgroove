@@ -2619,7 +2619,7 @@ impl Workspace {
                                 .w(Scrollbar::width())
                                 .child(
                                     Scrollbar::vertical(&self.sidebar_scroll)
-                                        .mode(ScrollbarMode::Always)
+                                        .mode(ScrollbarMode::Scrolling)
                                         .viewport_from_layout(),
                                 ),
                         )
