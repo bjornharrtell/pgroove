@@ -1,7 +1,7 @@
 //! Self-update from GitHub releases: check, download with checksum verification, install.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 pub use reqwest::Client as HttpClient;
@@ -273,6 +273,15 @@ pub fn replace_file(dest: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+/// The `.app` bundle that contains `exe` (`X.app/Contents/MacOS/pgroove`), if any.
+pub fn app_bundle_of(exe: &Path) -> Option<PathBuf> {
+    let app = exe.parent()?.parent()?.parent()?;
+    (app.extension()? == "app"
+        && exe.parent()?.file_name()? == "MacOS"
+        && cfg!(target_os = "macos"))
+    .then(|| app.to_path_buf())
+}
+
 /// Installs an extracted binary (or AppImage) over the running program.
 pub fn install(bytes: &[u8], package: Package) -> Result<()> {
     match package {
@@ -295,7 +304,18 @@ pub fn install(bytes: &[u8], package: Package) -> Result<()> {
             }
             let result = self_replace::self_replace(&tmp);
             let _ = std::fs::remove_file(&tmp);
-            result.context("replacing the running program")
+            result.context("replacing the running program")?;
+            // A swapped binary breaks the bundle's seal; seal it again (ad hoc).
+            if let Some(app) = app_bundle_of(&exe) {
+                let signed = std::process::Command::new("/usr/bin/codesign")
+                    .args(["--force", "--deep", "--sign", "-"])
+                    .arg(&app)
+                    .status();
+                if !signed.is_ok_and(|s| s.success()) {
+                    log::warn!("could not re-sign {}", app.display());
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -390,6 +410,17 @@ mod tests {
         assert_eq!(pick(target("macos", "x86_64", false)), None);
         assert_eq!(pick(target("linux", "aarch64", false)), None);
         let _ = current_target();
+    }
+
+    #[test]
+    fn finds_the_app_bundle() {
+        let exe = Path::new("/Applications/pgroove.app/Contents/MacOS/pgroove");
+        assert_eq!(
+            app_bundle_of(exe),
+            cfg!(target_os = "macos").then(|| PathBuf::from("/Applications/pgroove.app"))
+        );
+        assert_eq!(app_bundle_of(Path::new("/usr/bin/pgroove")), None);
+        assert_eq!(app_bundle_of(Path::new("/x/y.app/bin/pgroove")), None);
     }
 
     #[test]

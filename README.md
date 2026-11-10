@@ -39,9 +39,10 @@ fontconfig). See `.github/workflows/ci.yml` for the exact package list.
 Tagged releases publish a Linux x86_64 AppImage and tarball, a macOS Apple silicon
 (arm64) disk image (`.dmg` with `pgroove.app`) and tarball, and a Windows x86_64 zip.
 
-The macOS app is not signed or notarized, so Gatekeeper blocks the first launch: drag it to
-Applications, then right-click it and choose Open (or run
-`xattr -d com.apple.quarantine /Applications/pgroove.app`).
+The macOS app is not notarized, so Gatekeeper blocks the first launch. Drag it to
+Applications, then either right-click it and choose Open, or clear the download flag:
+`xattr -cr /Applications/pgroove.app`. If macOS says the app is "damaged", it is that flag
+(older builds also lacked a signature); the same command fixes it.
 
 The AppImage relies on the system's graphics libraries (Vulkan, Wayland or X11); make it executable and run it. On first start it installs a launcher entry and icon under
 `~/.local/share` (set `PGROOVE_NO_INTEGRATION=1` to skip), so it appears in menus and can be
