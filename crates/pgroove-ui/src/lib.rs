@@ -1,6 +1,7 @@
 //! gpui views built on gpui-kit.
 
 mod activity_view;
+mod commands;
 mod connections;
 mod dbeaver_dialog;
 mod dialogs;
@@ -8,15 +9,20 @@ mod grid_pane;
 mod mode;
 mod palette;
 mod plan_view;
+mod profiles;
 mod query_tab;
 mod results;
 mod schema_tree;
 mod selection;
+mod sessions;
+mod sidebar;
 mod sql_completion;
 mod structure_view;
 mod table_view;
+mod tabs;
 pub mod theme;
 mod title_bar;
+mod updates;
 mod workspace;
 
 pub use workspace::Workspace;
@@ -24,7 +30,8 @@ pub use workspace::Workspace;
 use gpui_kit::{App, KeyBinding};
 
 pub use query_tab::{CancelQuery, FormatSql, RunQuery};
-pub use workspace::{OpenPalette, Startup, ToggleFullscreen, step_cursor};
+pub use sidebar::step_cursor;
+pub use workspace::{OpenPalette, Startup, ToggleFullscreen};
 
 /// The action and key context for a command name from `pgroove_core::keys`.
 fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static str>)> {
