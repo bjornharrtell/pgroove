@@ -245,7 +245,16 @@ impl GridPane {
 
     fn stage(&mut self, value: Option<String>, cx: &mut Context<Self>) {
         if let Some((r, c)) = self.selected {
+            // On an inserted row, clearing the input means an explicit NULL.
             self.edit_session(cx, |s| s.set_value(r, c, value));
+            self.refresh_inspected(cx);
+        }
+    }
+
+    /// Makes the selected inserted cell use the column default again.
+    fn stage_default(&mut self, cx: &mut Context<Self>) {
+        if let Some((r, c)) = self.selected {
+            self.edit_session(cx, |s| s.set_insert_default(r, c));
             self.refresh_inspected(cx);
         }
     }
@@ -307,6 +316,12 @@ impl GridPane {
         let inspected = self.inspected.as_ref()?;
         let theme = cx.theme().clone();
         let name = self.grid.read(cx).delegate().column_name(c)?.to_string();
+        let inserted = self
+            .grid
+            .read(cx)
+            .delegate()
+            .session()
+            .is_some_and(|s| s.is_inserted(r));
         let grid = self.grid.clone();
         let editable = self.editable && inspected.can_edit;
         let note = inspected.note;
@@ -372,8 +387,25 @@ impl GridPane {
                                     .ghost()
                                     .xsmall()
                                     .label("Set NULL")
+                                    .tooltip(if inserted {
+                                        "Insert an explicit NULL in this column"
+                                    } else {
+                                        "Set this column to NULL"
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| this.stage(None, cx))),
-                            ),
+                            )
+                            .when(inserted, |d| {
+                                d.child(
+                                    Button::new("use-default")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Use default")
+                                        .tooltip("Omit this column when the row is inserted")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.stage_default(cx)),
+                                        ),
+                                )
+                            }),
                     )
                 })
                 .when(!editable, |d| {

@@ -9,6 +9,18 @@ use crate::data::{TableRef, quote_ident};
 
 pub type Cell = Option<String>;
 
+/// How an inserted row fills one column.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum InsertValue {
+    /// Omit the column, so the server uses its default.
+    #[default]
+    Default,
+    /// Write an explicit `NULL`.
+    Null,
+    /// Write the quoted text.
+    Value(String),
+}
+
 /// Quotes a text value as an untyped SQL literal (the server infers the type).
 pub fn quote_literal(v: &str) -> String {
     format!("'{}'", v.replace('\'', "''"))
@@ -48,7 +60,7 @@ enum Key {
 
 /// Pending edits against a loaded page of a table that has a primary key or row ids.
 ///
-/// Inserted rows use `None` for "use the column default".
+/// Inserted rows use [`InsertValue`], which keeps a default apart from an explicit NULL.
 #[derive(Debug, Clone)]
 pub struct EditSession {
     columns: Vec<String>,
@@ -56,7 +68,7 @@ pub struct EditSession {
     original: Vec<Vec<Cell>>,
     edits: BTreeMap<(usize, usize), Cell>,
     deleted: BTreeSet<usize>,
-    inserts: Vec<Vec<Cell>>,
+    inserts: Vec<Vec<InsertValue>>,
 }
 
 impl EditSession {
@@ -136,10 +148,13 @@ impl EditSession {
         self.edits.contains_key(&(row, col))
     }
 
-    /// The value to display, including pending edits.
+    /// The value to display, including pending edits; `None` for NULL and for a default.
     pub fn value(&self, row: usize, col: usize) -> Option<&str> {
         if let Some(i) = row.checked_sub(self.original.len()) {
-            return self.inserts.get(i)?.get(col)?.as_deref();
+            return match self.inserts.get(i)?.get(col)? {
+                InsertValue::Value(v) => Some(v.as_str()),
+                InsertValue::Default | InsertValue::Null => None,
+            };
         }
         match self.edits.get(&(row, col)) {
             Some(v) => v.as_deref(),
@@ -152,8 +167,9 @@ impl EditSession {
             return;
         }
         if let Some(i) = row.checked_sub(self.original.len()) {
+            let v = value.map_or(InsertValue::Null, InsertValue::Value);
             if let Some(cell) = self.inserts.get_mut(i).and_then(|r| r.get_mut(col)) {
-                *cell = value;
+                *cell = v;
             }
             return;
         }
@@ -178,8 +194,27 @@ impl EditSession {
         }
     }
 
-    pub fn add_insert(&mut self, mut values: Vec<Cell>) {
-        values.resize(self.columns.len(), None);
+    /// How an inserted cell is written; `None` for rows that are not inserted.
+    pub fn insert_value(&self, row: usize, col: usize) -> Option<&InsertValue> {
+        let i = row.checked_sub(self.original.len())?;
+        self.inserts.get(i)?.get(col)
+    }
+
+    /// Makes an inserted cell use the column default again.
+    pub fn set_insert_default(&mut self, row: usize, col: usize) {
+        if col >= self.columns.len() {
+            return;
+        }
+        let Some(i) = row.checked_sub(self.original.len()) else {
+            return;
+        };
+        if let Some(cell) = self.inserts.get_mut(i).and_then(|r| r.get_mut(col)) {
+            *cell = InsertValue::Default;
+        }
+    }
+
+    pub fn add_insert(&mut self, mut values: Vec<InsertValue>) {
+        values.resize(self.columns.len(), InsertValue::Default);
         self.inserts.push(values);
     }
 
@@ -254,7 +289,11 @@ impl EditSession {
                 .columns
                 .iter()
                 .zip(values)
-                .filter_map(|(c, v)| v.as_ref().map(|v| (quote_ident(c), quote_literal(v))))
+                .filter_map(|(c, v)| match v {
+                    InsertValue::Default => None,
+                    InsertValue::Null => Some((quote_ident(c), "NULL".to_string())),
+                    InsertValue::Value(v) => Some((quote_ident(c), quote_literal(v))),
+                })
                 .collect();
             let sql = if given.is_empty() {
                 format!("insert into {t} default values")
@@ -377,6 +416,10 @@ mod tests {
         Some(v.to_string())
     }
 
+    fn v(x: &str) -> InsertValue {
+        InsertValue::Value(x.to_string())
+    }
+
     fn session() -> EditSession {
         EditSession::new(
             vec!["id".into(), "name".into(), "note".into()],
@@ -436,7 +479,7 @@ mod tests {
         e.set_value(1, 2, None);
         e.toggle_delete(2);
         e.set_value(2, 1, s("ignored"));
-        e.add_insert(vec![s("9"), s("new")]);
+        e.add_insert(vec![v("9"), v("new")]);
         e.add_insert(vec![]);
         assert_eq!(e.row_count(), 5);
         assert_eq!(e.pending_count(), 5);
@@ -457,13 +500,39 @@ mod tests {
     }
 
     #[test]
+    fn insert_default_null_and_value() {
+        let mut e = session();
+        // id is omitted, name is a value, note is an explicit NULL.
+        e.add_insert(vec![InsertValue::Default, v("x"), InsertValue::Null]);
+        // A cell cleared to NULL and one reset to the default.
+        e.add_insert(vec![v("9"), InsertValue::Null, InsertValue::Null]);
+        e.set_insert_default(4, 2);
+        assert_eq!(e.insert_value(4, 2), Some(&InsertValue::Default));
+        assert_eq!(e.insert_value(0, 0), None, "loaded rows are not inserted");
+        assert_eq!(e.value(3, 1), Some("x"));
+        assert_eq!(e.value(3, 0), None, "a default shows as NULL");
+        assert_eq!(e.value(3, 2), None, "so does an explicit NULL");
+        let sql: Vec<_> = e.statements(&t()).into_iter().map(|s| s.sql).collect();
+        assert_eq!(
+            sql,
+            [
+                "insert into \"public\".\"t\" (\"name\", \"note\") values ('x', NULL)",
+                "insert into \"public\".\"t\" (\"id\", \"name\") values ('9', NULL)",
+            ]
+        );
+        assert_eq!(e.pending_count(), 2);
+        e.discard();
+        assert!(!e.is_dirty());
+    }
+
+    #[test]
     fn delete_toggle_and_insert_edit() {
         let mut e = session();
         e.toggle_delete(1);
         assert!(e.is_deleted(1));
         e.toggle_delete(1);
         assert!(!e.is_deleted(1));
-        e.add_insert(vec![s("9")]);
+        e.add_insert(vec![v("9")]);
         assert!(e.is_inserted(3) && !e.is_inserted(2));
         e.set_value(3, 1, s("v"));
         assert_eq!(e.value(3, 1), Some("v"));
@@ -633,7 +702,7 @@ mod tests {
         .unwrap();
         e.set_value(0, 1, s("it's"));
         e.toggle_delete(1);
-        e.add_insert(vec![s("3"), s("c")]);
+        e.add_insert(vec![v("3"), v("c")]);
         apply(&client, &e.statements(&table)).await.unwrap();
         let rows = client
             .query("select id, name from pgroove_e.t order by id", &[])

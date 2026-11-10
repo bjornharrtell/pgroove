@@ -10,7 +10,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::data::{self, PageRequest, Sort, TableRef};
-use pgroove_core::edit::{self, EditSession, RowIdentity};
+use pgroove_core::edit::{self, EditSession, InsertValue, RowIdentity};
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::{GridChanged, GridPane};
@@ -258,14 +258,22 @@ impl TableView {
                                 .text_xs()
                                 .child("Empty fields use the column default."),
                         )
+                        .child(div().text_xs().child(
+                            "Use Set NULL in the cell inspector to insert an explicit NULL.",
+                        ))
                         .children(fields),
                 )
                 .actions("Add row", true, move |_, _, cx| {
-                    let values: Vec<Option<String>> = inputs
+                    // An empty field omits the column; NULL is set on the added row.
+                    let values: Vec<InsertValue> = inputs
                         .iter()
                         .map(|i| {
                             let v = i.read(cx).value().to_string();
-                            (!v.is_empty()).then_some(v)
+                            if v.is_empty() {
+                                InsertValue::Default
+                            } else {
+                                InsertValue::Value(v)
+                            }
                         })
                         .collect();
                     this.update(cx, |tv, cx| {

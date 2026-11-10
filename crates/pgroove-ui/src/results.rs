@@ -5,13 +5,23 @@ use std::sync::Arc;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::*;
-use pgroove_core::edit::EditSession;
+use pgroove_core::edit::{EditSession, InsertValue};
 use pgroove_core::query::ResultSet;
 
 use crate::selection::{CellSelection, Mods};
 
 /// Characters of a cell drawn in the grid; the rest is in the inspector.
 const MAX_CELL_CHARS: usize = 300;
+
+/// What the grid draws in a cell.
+#[derive(Debug, PartialEq, Eq)]
+enum Shown<'a> {
+    /// An inserted cell that omits the column.
+    Default,
+    /// A stored or explicitly inserted NULL.
+    Null,
+    Text(&'a str),
+}
 
 /// Rows looked at when sizing and typing a column.
 const SAMPLE_ROWS: usize = 100;
@@ -206,6 +216,15 @@ impl ResultsTable {
         }
         self.rows().get(row)?.get(col)?.as_deref()
     }
+
+    /// What the grid draws in a cell: an inserted cell keeps a default apart from a NULL.
+    fn shown(&self, row: usize, col: usize) -> Shown<'_> {
+        match self.session.as_ref().and_then(|s| s.insert_value(row, col)) {
+            Some(InsertValue::Default) => Shown::Default,
+            Some(InsertValue::Null) => Shown::Null,
+            _ => self.cell(row, col).map_or(Shown::Null, Shown::Text),
+        }
+    }
 }
 
 impl TableDelegate for ResultsTable {
@@ -254,11 +273,12 @@ impl TableDelegate for ResultsTable {
             });
         let right = self.numeric.get(col_ix).copied().unwrap_or(false);
         let selected = self.selection.contains(row_ix, col_ix);
-        let base = match self.cell(row_ix, col_ix) {
-            Some(v) => div()
+        let base = match self.shown(row_ix, col_ix) {
+            Shown::Default => div().italic().opacity(0.5).child("default"),
+            Shown::Null => div().italic().opacity(0.5).child("NULL"),
+            Shown::Text(v) => div()
                 .truncate()
                 .child(pgroove_core::export::preview(v, MAX_CELL_CHARS)),
-            None => div().italic().opacity(0.5).child("NULL"),
         };
         let base = if right { base.text_right() } else { base };
         let base = base
@@ -336,6 +356,33 @@ mod tests {
         assert!(!super::is_numeric(&[vec![Some("x".into())]], 0));
         t.set_sorted(Some((0, true)));
         assert_eq!(t.sorted, Some((0, true)));
+    }
+
+    #[test]
+    fn inserted_cell_states() {
+        use super::Shown;
+        use pgroove_core::edit::{EditSession, InsertValue};
+        let mut t = ResultsTable::default();
+        t.set(shared(ResultSet {
+            columns: vec!["a".into(), "b".into()],
+            rows: vec![vec![Some("1".into()), None]],
+            count: 1,
+            truncated: false,
+        }));
+        assert_eq!(t.shown(0, 0), Shown::Text("1"));
+        assert_eq!(t.shown(0, 1), Shown::Null, "a stored NULL stays NULL");
+        let mut e = EditSession::new(
+            vec!["a".into(), "b".into()],
+            &["a".to_string()],
+            vec![vec![Some("1".into()), None]],
+        )
+        .unwrap();
+        e.add_insert(vec![InsertValue::Default, InsertValue::Null]);
+        t.set_session(Some(e));
+        assert_eq!(t.shown(1, 0), Shown::Default);
+        assert_eq!(t.shown(1, 1), Shown::Null);
+        t.session_mut().unwrap().set_value(1, 1, Some("v".into()));
+        assert_eq!(t.shown(1, 1), Shown::Text("v"));
     }
 
     /// The grid reads the very allocation the caller holds, cells included.
