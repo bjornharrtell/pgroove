@@ -2,9 +2,10 @@
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::*;
-use pgroove_core::{ConnectionProfile, SslMode};
+use pgroove_core::{ConnectionProfile, ProfileColor, SslMode};
 use std::rc::Rc;
 
 /// Input entities backing the connection dialog.
@@ -18,6 +19,8 @@ pub struct ConnectionForm {
     password: Entity<InputState>,
     uri: Entity<InputState>,
     ssl: Entity<SslMode>,
+    group: Entity<InputState>,
+    color: Entity<Option<ProfileColor>>,
 }
 
 /// Callback for the dialog's Test connection button.
@@ -66,6 +69,8 @@ impl ConnectionForm {
                 false,
             ),
             ssl: cx.new(|_| profile.ssl),
+            group: field(window, cx, &profile.group, "e.g. Work or Production", false),
+            color: cx.new(|_| profile.color),
         }
     }
 
@@ -104,6 +109,8 @@ impl ConnectionForm {
                 database: self.database.read(cx).value().trim().to_string(),
                 user: self.user.read(cx).value().trim().to_string(),
                 ssl: *self.ssl.read(cx),
+                group: self.group.read(cx).value().trim().to_string(),
+                color: *self.color.read(cx),
             },
             password: self.password.read(cx).value().to_string(),
         }
@@ -147,6 +154,48 @@ impl ConnectionForm {
             .small()
             .label("Test connection")
             .on_click(move |_, window, cx| on_test(form.values(cx), window, cx));
+        let chosen = *self.color.read(cx);
+        let swatch = |id: &'static str, color: Option<ProfileColor>| {
+            let entity = self.color.clone();
+            let selected = chosen == color;
+            let dot = div()
+                .id(id)
+                .size(px(20.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    cx.theme().foreground
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .tooltip(move |window, cx| {
+                    Tooltip::new(color.map_or("No color", ProfileColor::label)).build(window, cx)
+                })
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |c, _| *c = color);
+                    window.refresh();
+                });
+            match color {
+                Some(c) => dot.bg(rgb(c.rgb())),
+                None => dot
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .text_xs()
+                    .child("–"),
+            }
+        };
+        let colors = h_flex()
+            .gap_2()
+            .items_center()
+            .child(swatch("color-none", None))
+            .children(ProfileColor::ALL.iter().map(|c| {
+                let id: &'static str = c.label();
+                swatch(id, Some(*c))
+            }));
         v_flex()
             .gap_3()
             .child(
@@ -157,6 +206,13 @@ impl ConnectionForm {
                     .child(fill),
             )
             .child(row("Name", &self.name))
+            .child(row("Group (optional)", &self.group))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child("Color"))
+                    .child(colors),
+            )
             .child(
                 h_flex()
                     .gap_2()

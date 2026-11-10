@@ -686,6 +686,7 @@ impl QueryTab {
             .xsmall()
             .icon(IconName::Database)
             .label(self.database.clone())
+            .max_w(px(200.))
             .tooltip("Choose which open database this query runs against")
             .dropdown_menu(move |menu, _, _| {
                 if choices.is_empty() {
@@ -876,7 +877,8 @@ impl Render for QueryTab {
                             .outline()
                             .xsmall()
                             .icon(IconName::Play)
-                            .label("Run · Ctrl+Enter")
+                            .label("Run")
+                            .tooltip("Run (Ctrl+Enter)")
                             .loading(self.run == RunState::Running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_query(cx))),
                     )
@@ -920,7 +922,7 @@ impl Render for QueryTab {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Download)
-                            .label("Export CSV…")
+                            .label("Export…")
                             .tooltip(
                                 "Stream the full result of one query to a file, with no row limit",
                             )
@@ -934,7 +936,7 @@ impl Render for QueryTab {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Clock)
-                            .label("History")
+                            .tooltip("Query history")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_history(window, cx)),
                             ),
@@ -944,7 +946,7 @@ impl Render for QueryTab {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Bookmark)
-                            .label("Snippets")
+                            .tooltip("Saved snippets")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_snippets(window, cx)),
                             ),

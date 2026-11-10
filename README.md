@@ -7,7 +7,9 @@ Requires PostgreSQL 13 or newer on the server.
 ## Features
 
 - **Connections:** saved profiles, passwords in the OS keychain, connection URI import,
-  TLS modes (`disable`, `prefer`, `require`, `verify-full`), test connection.
+  TLS modes (`disable`, `prefer`, `require`, `verify-full`), test connection. Connections can
+  have a group and a marker color (for example red for production); once there is more than
+  one group, the sidebar lists them under collapsible group headers.
 - **Schema browser:** a search box finds tables, views and functions across every schema; lists every database on the server (click to open or close one; several can be open at once, across connections), then a lazy tree of schemas grouped into tables, views, sequences, types and functions, tables, views, sequences, types, functions and
   extensions, with context menus (open data or structure, copy name, show definition).
 - **SQL editor:** Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,

@@ -131,6 +131,15 @@ fn leaf_indent(parent_depth: usize) -> f32 {
 
 #[derive(Clone)]
 enum SidebarItem {
+    /// Header of a group of connections (only when there are several groups).
+    Group {
+        /// Lowercase key, as stored in the session.
+        key: String,
+        /// Name to show; empty for connections without a group.
+        label: String,
+        count: usize,
+        collapsed: bool,
+    },
     Connection(usize, ConnectionProfile),
     Database {
         profile: ConnectionProfile,
@@ -173,6 +182,8 @@ pub struct Workspace {
     /// Activity monitors, expanded schemas and the front tab to restore once their databases connect.
     pending_activity: Vec<(String, String)>,
     pending_expanded: Vec<SessionExpanded>,
+    /// Connection groups folded in the sidebar (lowercase names).
+    collapsed_groups: std::collections::BTreeSet<String>,
     pending_active: Option<ActiveTab>,
     /// Keyboard focus and cursor of the sidebar tree.
     sidebar_focus: FocusHandle,
@@ -308,6 +319,7 @@ impl Workspace {
             window_size: None,
             pending_activity: session.activity.clone(),
             pending_expanded: session.expanded.clone(),
+            collapsed_groups: session.collapsed_groups.iter().cloned().collect(),
             pending_active: session.active.clone(),
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::new(),
@@ -523,6 +535,7 @@ impl Workspace {
                 .clone()
                 .or_else(|| self.active_descriptor(cx)),
             tree_filter: (!filter.trim().is_empty()).then_some(filter),
+            collapsed_groups: self.collapsed_groups.iter().cloned().collect(),
         };
         if let Err(e) = state.save(path) {
             log::warn!("could not save session: {e:#}");
@@ -1937,6 +1950,13 @@ impl Workspace {
                     }),
             )
             .child(div().flex_1().truncate().child(p.name.clone()))
+            .children(p.color.map(|c| {
+                div()
+                    .size(px(8.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(rgb(c.rgb()))
+            }))
             .child(
                 h_flex()
                     .invisible()
@@ -2027,7 +2047,35 @@ impl Workspace {
     /// The rows of the sidebar tree, top to bottom.
     fn sidebar_items(&self) -> Vec<SidebarItem> {
         let mut items: Vec<SidebarItem> = Vec::new();
-        for (i, p) in self.store.profiles().iter().cloned().enumerate() {
+        let profiles = self.store.profiles();
+        let grouped = pgroove_core::profile::has_several_groups(profiles);
+        let mut current: Option<String> = None;
+        for (i, p) in pgroove_core::profile::grouped_order(profiles)
+            .into_iter()
+            .map(|(i, p)| (i, p.clone()))
+        {
+            if grouped {
+                let key = p.group.trim().to_lowercase();
+                if current.as_ref() != Some(&key) {
+                    let count = profiles
+                        .iter()
+                        .filter(|q| q.group.trim().to_lowercase() == key)
+                        .count();
+                    items.push(SidebarItem::Group {
+                        collapsed: self.collapsed_groups.contains(&key),
+                        label: p.group.trim().to_string(),
+                        count,
+                        key: key.clone(),
+                    });
+                    current = Some(key);
+                }
+                if self
+                    .collapsed_groups
+                    .contains(&p.group.trim().to_lowercase())
+                {
+                    continue;
+                }
+            }
             let open: Vec<&DbSession> = self
                 .sessions
                 .iter()
@@ -2086,6 +2134,7 @@ impl Workspace {
     /// Whether a sidebar row is expanded (`None` for rows that can't expand).
     fn item_expanded(&self, item: &SidebarItem) -> Option<bool> {
         match item {
+            SidebarItem::Group { collapsed, .. } => Some(!collapsed),
             SidebarItem::Connection(_, p) => {
                 Some(self.sessions.iter().any(|s| s.profile.name == p.name))
             }
@@ -2104,6 +2153,7 @@ impl Workspace {
     /// Does what clicking the row does.
     fn activate_item(&mut self, item: &SidebarItem, window: &mut Window, cx: &mut Context<Self>) {
         match item {
+            SidebarItem::Group { key, .. } => self.toggle_group(key.clone(), cx),
             SidebarItem::Connection(_, p) => {
                 if self.sessions.iter().any(|s| s.profile.name == p.name) {
                     self.close_profile(&p.name, cx);
@@ -2171,6 +2221,58 @@ impl Workspace {
         }
     }
 
+    fn toggle_group(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.collapsed_groups.remove(&key) {
+            self.collapsed_groups.insert(key);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    fn group_row(
+        &self,
+        ix: usize,
+        key: &str,
+        label: &str,
+        count: usize,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let key = key.to_string();
+        let hover = theme.sidebar_accent;
+        let label = if label.is_empty() { "Ungrouped" } else { label };
+        self.tree_row(("group", ix), 0, cx)
+            .cursor_pointer()
+            .hover(move |d| d.bg(hover))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size_4()
+                .text_color(theme.muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.muted_foreground)
+                    .child(label.to_uppercase()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(count.to_string()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(key.clone(), cx)))
+            .into_any_element()
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let items = self.sidebar_items();
@@ -2187,6 +2289,12 @@ impl Workspace {
                 range
                     .map(|ix| {
                         let element = match &items[ix] {
+                            SidebarItem::Group {
+                                key,
+                                label,
+                                count,
+                                collapsed,
+                            } => this.group_row(ix, key, label, *count, *collapsed, cx),
                             SidebarItem::Connection(i, p) => this.connection_row(*i, p.clone(), cx),
                             SidebarItem::Database { profile, session } => {
                                 this.database_row(ix, profile.clone(), *session, cx)

@@ -72,6 +72,9 @@ pub struct SessionState {
     /// Text in the tree's search box.
     #[serde(default)]
     pub tree_filter: Option<String>,
+    /// Connection groups collapsed in the sidebar (lowercase names).
+    #[serde(default)]
+    pub collapsed_groups: Vec<String>,
 }
 
 /// Default and allowed sizes of the resizable panes, in logical pixels.
@@ -169,6 +172,7 @@ mod tests {
                 name: "orders".into(),
             }),
             tree_filter: Some("ord".into()),
+            collapsed_groups: vec!["work".into()],
         };
         s.save(&path).unwrap();
         assert_eq!(SessionState::load(&path), s);

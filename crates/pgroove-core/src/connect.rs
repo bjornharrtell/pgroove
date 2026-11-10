@@ -126,6 +126,7 @@ pub(crate) async fn test_connection() -> Option<(Client, String)> {
         user: f[2].into(),
         database: f[4].into(),
         ssl: SslMode::Prefer,
+        ..Default::default()
     };
     let pw = (!f[3].is_empty()).then_some(f[3]);
     Some(connect(&p, pw).await.unwrap())
@@ -145,6 +146,7 @@ mod tests {
             database: "shop".into(),
             user: "me".into(),
             ssl: SslMode::VerifyFull,
+            ..Default::default()
         };
         let cfg = build_config(&p, Some("pw"));
         assert_eq!(cfg.get_ssl_mode(), DriverSsl::Require);
@@ -236,6 +238,7 @@ mod tests {
             user: f[2].into(),
             database: f[4].into(),
             ssl: SslMode::Require,
+            ..Default::default()
         };
         let pw = (!f[3].is_empty()).then_some(f[3]);
         let ssl_in_use = |client: Client| async move {

@@ -50,6 +50,60 @@ impl SslMode {
     }
 }
 
+/// A marker color for a connection, e.g. red for production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProfileColor {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl ProfileColor {
+    pub const ALL: [ProfileColor; 8] = [
+        ProfileColor::Red,
+        ProfileColor::Orange,
+        ProfileColor::Yellow,
+        ProfileColor::Green,
+        ProfileColor::Teal,
+        ProfileColor::Blue,
+        ProfileColor::Purple,
+        ProfileColor::Pink,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProfileColor::Red => "Red",
+            ProfileColor::Orange => "Orange",
+            ProfileColor::Yellow => "Yellow",
+            ProfileColor::Green => "Green",
+            ProfileColor::Teal => "Teal",
+            ProfileColor::Blue => "Blue",
+            ProfileColor::Purple => "Purple",
+            ProfileColor::Pink => "Pink",
+        }
+    }
+
+    /// The color as `0xRRGGBB`.
+    pub fn rgb(self) -> u32 {
+        match self {
+            ProfileColor::Red => 0xE5484D,
+            ProfileColor::Orange => 0xF76B15,
+            ProfileColor::Yellow => 0xE2B714,
+            ProfileColor::Green => 0x30A46C,
+            ProfileColor::Teal => 0x12A594,
+            ProfileColor::Blue => 0x3E63DD,
+            ProfileColor::Purple => 0x8E4EC6,
+            ProfileColor::Pink => 0xD6409F,
+        }
+    }
+}
+
 /// A saved connection profile. The password is never stored here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionProfile {
@@ -60,6 +114,12 @@ pub struct ConnectionProfile {
     pub user: String,
     #[serde(default)]
     pub ssl: SslMode,
+    /// Group the connection is listed under; empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Marker color shown next to the connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ProfileColor>,
 }
 
 impl Default for ConnectionProfile {
@@ -71,8 +131,32 @@ impl Default for ConnectionProfile {
             database: "postgres".into(),
             user: "postgres".into(),
             ssl: SslMode::default(),
+            group: String::new(),
+            color: None,
         }
     }
+}
+
+/// Connections in the order the sidebar lists them: grouped, groups by name with the
+/// ungrouped ones last, each group keeping the saved order. Returns `(index in the input,
+/// profile)` pairs.
+pub fn grouped_order(profiles: &[ConnectionProfile]) -> Vec<(usize, &ConnectionProfile)> {
+    let mut out: Vec<(usize, &ConnectionProfile)> = profiles.iter().enumerate().collect();
+    out.sort_by(|(_, a), (_, b)| {
+        let (ga, gb) = (a.group.trim().to_lowercase(), b.group.trim().to_lowercase());
+        (ga.is_empty(), ga).cmp(&(gb.is_empty(), gb))
+    });
+    out
+}
+
+/// Whether group headers are worth showing: only when the connections fall in more than one
+/// group (counting "no group" as one).
+pub fn has_several_groups(profiles: &[ConnectionProfile]) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    for p in profiles {
+        seen.insert(p.group.trim().to_lowercase());
+    }
+    seen.len() > 1
 }
 
 impl ConnectionProfile {
@@ -220,5 +304,47 @@ mod tests {
             mutate(&mut p);
             assert_eq!(p.validate(), Err(msg));
         }
+    }
+
+    #[test]
+    fn groups_and_colors() {
+        let mk = |name: &str, group: &str| ConnectionProfile {
+            name: name.into(),
+            group: group.into(),
+            ..Default::default()
+        };
+        let ps = vec![
+            mk("a", ""),
+            mk("b", "Work"),
+            mk("c", "work "),
+            mk("d", "Home"),
+        ];
+        let names: Vec<&str> = grouped_order(&ps)
+            .iter()
+            .map(|(_, p)| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["d", "b", "c", "a"]);
+        assert_eq!(grouped_order(&ps)[3].0, 0);
+        assert!(has_several_groups(&ps));
+        assert!(!has_several_groups(&[mk("a", "Work"), mk("b", " work")]));
+        assert!(!has_several_groups(&[mk("a", ""), mk("b", "")]));
+        assert!(!has_several_groups(&[]));
+        let p = ConnectionProfile {
+            color: Some(ProfileColor::Red),
+            group: "Prod".into(),
+            ..Default::default()
+        };
+        let text = toml::to_string(&p).unwrap();
+        assert!(text.contains("color = \"red\"") && text.contains("group = \"Prod\""));
+        let back: ConnectionProfile = toml::from_str(&text).unwrap();
+        assert_eq!(back, p);
+        let plain = toml::to_string(&ConnectionProfile::default()).unwrap();
+        assert!(!plain.contains("group") && !plain.contains("color"));
+        assert_eq!(ProfileColor::ALL.len(), 8);
+        assert!(
+            ProfileColor::ALL
+                .iter()
+                .all(|c| !c.label().is_empty() && c.rgb() > 0)
+        );
     }
 }
