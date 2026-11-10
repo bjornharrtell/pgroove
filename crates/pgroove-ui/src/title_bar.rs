@@ -45,24 +45,13 @@ fn close_button(cx: &App) -> impl IntoElement {
         .on_click(|_, window, _| window.remove_window())
 }
 
-/// Builds the title bar around `content`. Dragging moves the window and a
-/// double click zooms it on Linux.
-pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -> impl IntoElement {
+/// A part of the title bar that drags the window and, on Linux, zooms it on a double click.
+/// Only these parts react: buttons and chips in the bar keep their own clicks, so pressing
+/// one never starts a window move or counts toward a double click.
+pub fn drag_area(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
     let state = window.use_state(cx, |_, _| DragState { should_move: false });
-    let radii = window_corner_radii(window, cx);
-    let theme = cx.theme().clone();
-    let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
-    h_flex()
-        .id("title-bar")
-        .flex_shrink_0()
-        .h(px(HEIGHT))
-        .items_center()
-        .pl(px(LEFT_PADDING))
-        .rounded_tl(radii.top_left)
-        .rounded_tr(radii.top_right)
-        .bg(theme.title_bar)
-        .border_b_1()
-        .border_color(theme.title_bar_border)
+    div()
+        .id(id)
         .when(cfg!(target_os = "linux"), |d| {
             d.on_double_click(|_, window, _| window.zoom_window())
         })
@@ -81,13 +70,38 @@ pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -
                 window.start_window_move();
             }
         }))
+        .window_control_area(WindowControlArea::Drag)
+}
+
+/// Builds the title bar around `content`; put `drag_area`s in the content for the parts that
+/// should move the window.
+pub fn title_bar(content: impl IntoElement, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let radii = window_corner_radii(window, cx);
+    let theme = cx.theme().clone();
+    let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
+    h_flex()
+        .id("title-bar")
+        .flex_shrink_0()
+        .h(px(HEIGHT))
+        .items_center()
+        .rounded_tl(radii.top_left)
+        .rounded_tr(radii.top_right)
+        .bg(theme.title_bar)
+        .border_b_1()
+        .border_color(theme.title_bar_border)
+        // The left margin (clear of the macOS window buttons) drags too.
+        .child(
+            drag_area("title-drag-left", window, cx)
+                .w(px(LEFT_PADDING))
+                .h_full()
+                .flex_shrink_0(),
+        )
         .child(
             div()
                 .flex_1()
                 .h_full()
                 .flex()
                 .items_center()
-                .window_control_area(WindowControlArea::Drag)
                 // Keep the content (the palette button) clear of the close button.
                 .pr_4()
                 .child(content),

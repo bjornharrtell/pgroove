@@ -2658,7 +2658,7 @@ impl Workspace {
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_read_only(cx)));
         let focused = self.focused_session(cx).and_then(|id| self.session(id));
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let (label, color) = match focused {
             Some(s) => {
                 let mut label = s.label();
@@ -2680,7 +2680,7 @@ impl Workspace {
                 .gap_3()
                 .items_center()
                 .child(
-                    div()
+                    crate::title_bar::drag_area("title-drag-name", window, cx)
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child("pgroove"),
@@ -2718,7 +2718,11 @@ impl Workspace {
                         })),
                 )
                 .children(self.update_chip(cx))
-                .child(div().flex_1())
+                .child(
+                    crate::title_bar::drag_area("title-drag-fill", window, cx)
+                        .flex_1()
+                        .h_full(),
+                )
                 .child(
                     Button::new("palette")
                         .outline()
