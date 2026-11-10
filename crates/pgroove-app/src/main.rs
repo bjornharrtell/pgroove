@@ -70,5 +70,7 @@ fn main() -> anyhow::Result<()> {
             .expect("failed to open window");
             log::info!("pgroove started");
         });
+    // History and snippets are written in the background; wait for them now.
+    pgroove_core::history::flush_all();
     Ok(())
 }

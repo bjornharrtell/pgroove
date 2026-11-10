@@ -120,6 +120,10 @@ enum UpdateState {
 /// Height of every sidebar row; the virtualized list needs them all to be the same.
 const ROW_HEIGHT: f32 = 28.;
 
+/// How long resize events pause before the session is written, so a dragged divider
+/// costs one write instead of one per frame.
+const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Left padding of the first tree level and the extra indent per level.
 const TREE_BASE: f32 = 10.;
 const INDENT_STEP: f32 = 16.;
@@ -205,6 +209,11 @@ pub struct Workspace {
     sidebar_width: f32,
     /// Height of the SQL editor pane (shared by new query tabs and remembered).
     editor_height: f32,
+    /// The newest state written or still to be written, so a save on drop carries the
+    /// final pane sizes.
+    session_snapshot: Option<SessionState>,
+    /// A debounced session save is scheduled.
+    save_pending: bool,
 }
 
 /// State loaded from disk before the window opens.
@@ -238,8 +247,7 @@ impl Workspace {
         let main_split = cx.new(|_| ResizableState::default());
         cx.subscribe(&main_split, |this, state, _: &ResizablePanelEvent, cx| {
             if let Some(w) = state.read(cx).sizes().first() {
-                this.sidebar_width = f32::from(*w);
-                this.save_session(cx);
+                this.resized(Some(f32::from(*w)), None, cx);
             }
         })
         .detach();
@@ -294,8 +302,7 @@ impl Workspace {
                 })
                 .detach();
                 cx.subscribe(&tab, |this, _, ev: &EditorResized, cx| {
-                    this.editor_height = ev.0;
-                    this.save_session(cx);
+                    this.resized(None, Some(ev.0), cx);
                 })
                 .detach();
                 tab.update(cx, |t, _| t.set_editor_height(editor_height));
@@ -353,6 +360,8 @@ impl Workspace {
             main_split,
             sidebar_width,
             editor_height,
+            session_snapshot: Some(session.clone()),
+            save_pending: false,
             settings,
             settings_path,
             http: update::http_client(),
@@ -455,10 +464,54 @@ impl Workspace {
 
     /// Writes the restorable state: open databases, tabs, tree state, layout and window size.
     /// Items still waiting to be restored are kept so an early save doesn't lose them.
-    fn save_session(&self, cx: &App) {
+    fn save_session(&mut self, cx: &App) {
+        if let Some(state) = self.session_state(cx) {
+            self.write_session(state);
+        }
+    }
+
+    /// Remembers pane sizes from a resize event and writes the session once the drag
+    /// pauses, so a divider drag costs one write instead of one per frame.
+    fn resized(&mut self, sidebar: Option<f32>, editor: Option<f32>, cx: &mut Context<Self>) {
+        if let Some(w) = sidebar {
+            self.sidebar_width = w;
+        }
+        if let Some(h) = editor {
+            self.editor_height = h;
+        }
+        if let Some(state) = &mut self.session_snapshot {
+            state.sidebar_width = Some(self.sidebar_width);
+            state.editor_height = Some(self.editor_height);
+        }
+        if self.save_pending {
+            return;
+        }
+        self.save_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
+            this.update(cx, |this, cx| {
+                this.save_pending = false;
+                this.save_session(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Writes `state` and keeps it, so a save on drop of the workspace can repeat it.
+    fn write_session(&mut self, state: SessionState) {
         let Some(path) = &self.session_path else {
             return;
         };
+        if let Err(e) = state.save(path) {
+            log::warn!("could not save session: {e:#}");
+        }
+        self.session_snapshot = Some(state);
+    }
+
+    /// The state to restore right now; `None` when the session is not persisted.
+    fn session_state(&self, cx: &App) -> Option<SessionState> {
+        self.session_path.as_ref()?;
         let mut tables: Vec<pgroove_core::session::SessionTable> = self
             .tabs
             .iter()
@@ -544,9 +597,7 @@ impl Workspace {
             tree_filter: (!filter.trim().is_empty()).then_some(filter),
             collapsed_groups: self.collapsed_groups.iter().cloned().collect(),
         };
-        if let Err(e) = state.save(path) {
-            log::warn!("could not save session: {e:#}");
-        }
+        Some(state)
     }
 
     /// Opens a database (or focuses it when already open).
@@ -1024,8 +1075,7 @@ impl Workspace {
         })
         .detach();
         cx.subscribe(&tab, |this, _, ev: &EditorResized, cx| {
-            this.editor_height = ev.0;
-            this.save_session(cx);
+            this.resized(None, Some(ev.0), cx);
         })
         .detach();
         let height = self.editor_height;
@@ -3050,6 +3100,17 @@ impl Render for Workspace {
                     .left(div().text_xs().child(left))
                     .right(div().text_xs().child(right)),
             )
+    }
+}
+
+impl Drop for Workspace {
+    /// Writes a debounced save that is still pending; cheap when there is none.
+    fn drop(&mut self) {
+        if self.save_pending
+            && let Some(state) = self.session_snapshot.clone()
+        {
+            self.write_session(state);
+        }
     }
 }
 

@@ -287,10 +287,8 @@ impl QueryTab {
             millis,
             ok,
         };
-        if let Ok(mut h) = self.history.lock()
-            && let Err(e) = h.push(entry)
-        {
-            log::warn!("could not save history: {e:#}");
+        if let Ok(mut h) = self.history.lock() {
+            h.push(entry);
         }
     }
 
@@ -552,7 +550,7 @@ impl QueryTab {
                                     .label("Clear history")
                                     .on_click(move |_, window, _| {
                                         if let Ok(mut h) = clear_history.lock() {
-                                            let _ = h.clear();
+                                            h.clear();
                                         }
                                         window.refresh();
                                     }),
@@ -613,7 +611,7 @@ impl QueryTab {
                             .tooltip("Delete snippet")
                             .on_click(move |_, window, _| {
                                 if let Ok(mut s) = del.lock() {
-                                    let _ = s.remove(&name_del);
+                                    s.remove(&name_del);
                                 }
                                 window.refresh();
                             }),
