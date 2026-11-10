@@ -28,14 +28,16 @@ fn exec_quote(path: &str) -> String {
     out
 }
 
-/// The launcher entry that starts the AppImage at `appimage`.
-pub fn desktop_entry(appimage: &Path) -> String {
+/// The launcher entry that starts the AppImage at `appimage`. The icon is given by absolute
+/// path, which works even when the desktop's icon cache doesn't know the per-user theme dir.
+pub fn desktop_entry(appimage: &Path, icon: &Path) -> String {
     format!(
         "[Desktop Entry]\nType=Application\nName=pgroove\nGenericName=PostgreSQL admin\n\
-         Comment=Browse, query and monitor PostgreSQL databases\nExec={} %U\nIcon={APP_ID}\n\
+         Comment=Browse, query and monitor PostgreSQL databases\nExec={} %U\nIcon={}\n\
          Terminal=false\nCategories=Development;Database;\nKeywords=postgres;postgresql;sql;database;\n\
          StartupWMClass={APP_ID}\n",
-        exec_quote(&appimage.to_string_lossy())
+        exec_quote(&appimage.to_string_lossy()),
+        icon.to_string_lossy()
     )
 }
 
@@ -54,16 +56,14 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool> {
 /// anything was written. Safe to call on every start.
 pub fn integrate(appimage: &Path, data_dir: &Path) -> Result<bool> {
     let mut changed = false;
+    let icons = data_dir.join("icons").join("hicolor");
+    let png = icons.join("256x256/apps").join(format!("{APP_ID}.png"));
+    changed |= write_if_changed(&png, ICON_PNG)?;
     changed |= write_if_changed(
         &data_dir
             .join("applications")
             .join(format!("{APP_ID}.desktop")),
-        desktop_entry(appimage).as_bytes(),
-    )?;
-    let icons = data_dir.join("icons").join("hicolor");
-    changed |= write_if_changed(
-        &icons.join("256x256/apps").join(format!("{APP_ID}.png")),
-        ICON_PNG,
+        desktop_entry(appimage, &png).as_bytes(),
     )?;
     changed |= write_if_changed(
         &icons.join("scalable/apps").join(format!("{APP_ID}.svg")),
@@ -102,9 +102,15 @@ mod tests {
 
     #[test]
     fn entry_points_at_the_appimage() {
-        let e = desktop_entry(Path::new("/opt/pg root/pgroove.AppImage"));
+        let e = desktop_entry(
+            Path::new("/opt/pg root/pgroove.AppImage"),
+            Path::new("/home/u/.local/share/icons/pgroove.png"),
+        );
         assert!(e.contains("Exec=\"/opt/pg root/pgroove.AppImage\" %U\n"));
-        assert!(e.contains("Icon=pgroove\n") && e.contains("StartupWMClass=pgroove\n"));
+        assert!(
+            e.contains("Icon=/home/u/.local/share/icons/pgroove.png\n")
+                && e.contains("StartupWMClass=pgroove\n")
+        );
     }
 
     #[test]
