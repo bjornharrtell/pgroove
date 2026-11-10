@@ -117,6 +117,9 @@ enum UpdateState {
     Ready(pgroove_core::update::Version),
 }
 
+/// Height of every sidebar row; the virtualized list needs them all to be the same.
+const ROW_HEIGHT: f32 = 28.;
+
 /// Left padding of the first tree level and the extra indent per level.
 const TREE_BASE: f32 = 10.;
 const INDENT_STEP: f32 = 16.;
@@ -1843,7 +1846,7 @@ impl Workspace {
             .gap_1p5()
             .pl(px(left))
             .pr_2()
-            .h(px(26.))
+            .h(px(ROW_HEIGHT))
             .flex_shrink_0()
             .items_center()
             .text_sm()
@@ -2060,7 +2063,7 @@ impl Workspace {
                 .into_any_element(),
             Row::Message(m) => div()
                 .pl(px(leaf_indent(3)))
-                .h(px(26.))
+                .h(px(ROW_HEIGHT))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -2399,11 +2402,11 @@ impl Workspace {
         let label = if label.is_empty() { "Ungrouped" } else { label };
         // Looks like an accordion header (title left, chevron right, ruled between groups);
         // the rows stay in the virtualized list, which an accordion's content could not be.
-        // The list assumes every row is the same height (26px), so the header keeps that
+        // The list assumes every row is the same height, so the header keeps that
         // height too; it is set apart by a tinted, inset block rather than a rule.
-        // The block sits at the bottom of the row, leaving a gap above it between groups.
+        // The block sits at the bottom of the row, leaving a 4px gap above it between groups.
         div()
-            .h(px(26.))
+            .h(px(ROW_HEIGHT))
             .flex_shrink_0()
             .flex()
             .items_end()
@@ -2412,7 +2415,7 @@ impl Workspace {
                 h_flex()
                     .id(("group", ix))
                     .w_full()
-                    .h(px(20.))
+                    .h(px(ROW_HEIGHT - 4.))
                     .px_2()
                     .gap_2()
                     .items_center()
@@ -2479,7 +2482,7 @@ impl Workspace {
                             }
                             SidebarItem::Note(m) => div()
                                 .pl(px(leaf_indent(2)))
-                                .h(px(26.))
+                                .h(px(ROW_HEIGHT))
                                 .flex_shrink_0()
                                 .flex()
                                 .items_center()
@@ -2500,7 +2503,7 @@ impl Workspace {
                         let is_cursor = focused && this.cursor == Some(ix);
                         div()
                             .w_full()
-                            .h(px(26.))
+                            .h(px(ROW_HEIGHT))
                             .flex_shrink_0()
                             .border_l_2()
                             .border_color(if is_cursor {
