@@ -1573,6 +1573,25 @@ impl Workspace {
         Ok(())
     }
 
+    /// Asks before removing a saved connection, since that also drops its stored password.
+    fn confirm_delete(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (this, name) = (this.clone(), name.clone());
+            dialog
+                .title("Delete connection")
+                .w(px(420.))
+                .child(div().text_sm().child(format!(
+                    "Delete “{name}”? This removes the saved connection and its stored \
+                     password, and closes any databases open on it. It can't be undone."
+                )))
+                .actions("Delete", true, move |_, _, cx| {
+                    this.update(cx, |ws, cx| ws.delete(&name, cx));
+                    true
+                })
+        });
+    }
+
     fn delete(&mut self, name: &str, cx: &mut Context<Self>) {
         self.close_profile(name, cx);
         if let Err(e) = self
@@ -2136,9 +2155,9 @@ impl Workspace {
                             .xsmall()
                             .icon(IconName::Trash)
                             .tooltip("Delete connection")
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.delete(&pd, cx)
+                                this.confirm_delete(pd.clone(), window, cx)
                             })),
                     ),
             )
