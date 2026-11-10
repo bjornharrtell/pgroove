@@ -2399,39 +2399,48 @@ impl Workspace {
         let label = if label.is_empty() { "Ungrouped" } else { label };
         // Looks like an accordion header (title left, chevron right, ruled between groups);
         // the rows stay in the virtualized list, which an accordion's content could not be.
-        h_flex()
-            .id(("group", ix))
-            .h(px(30.))
+        // The rule is inset from the pane's edges and omitted above the first group.
+        div()
             .flex_shrink_0()
-            .px_3()
-            .gap_2()
-            .items_center()
-            .border_t_1()
-            .border_color(theme.sidebar_border)
-            .cursor_pointer()
-            .hover(move |d| d.bg(hover))
+            .px_2()
             .child(
-                div()
-                    .flex_1()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(label.to_string()),
+                h_flex()
+                    .id(("group", ix))
+                    .h(px(30.))
+                    .px_1()
+                    .gap_2()
+                    .items_center()
+                    .rounded(theme.radius)
+                    .when(ix > 0, |d| {
+                        d.border_t_1().border_color(theme.sidebar_border)
+                    })
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(count.to_string()),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .rotate(percentage(if collapsed { 0. } else { 0.5 })),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_group(key.clone(), cx)),
+                    ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(count.to_string()),
-            )
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .xsmall()
-                    .flex_none()
-                    .text_color(theme.muted_foreground)
-                    .rotate(percentage(if collapsed { 0. } else { 0.5 })),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(key.clone(), cx)))
             .into_any_element()
     }
 
