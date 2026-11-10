@@ -657,22 +657,28 @@ impl TableView {
                     return;
                 }
                 match result {
-                    Ok((mut page, identity)) => {
+                    Ok((page, identity)) => {
                         this.rows = page.data.rows.len();
                         this.notice = None;
                         this.has_more = page.has_more;
                         this.pane
-                            .update(cx, |p, cx| p.set_data(Some(&page.data), cx));
-                        // The grid keeps one copy of the rows; the edit session takes the
-                        // original instead of a third copy, which matters for wide tables.
-                        let rows = std::mem::take(&mut page.data.rows);
-                        let columns = page.data.columns.clone();
-                        let session = match &identity {
-                            RowIdentity::PrimaryKey(pk) => EditSession::new(columns, pk, rows).ok(),
-                            RowIdentity::Ctid => {
-                                EditSession::with_row_ids(columns, rows, page.row_ids).ok()
+                            .update(cx, |p, cx| p.set_data(Some(page.data.clone()), cx));
+                        // The grid shares the page's rows; only an edit session keeps its own
+                        // copy, because staging changes rewrites them.
+                        let session = if identity == RowIdentity::None {
+                            None
+                        } else {
+                            let columns = page.data.columns.clone();
+                            let rows = page.data.rows.clone();
+                            match &identity {
+                                RowIdentity::PrimaryKey(pk) => {
+                                    EditSession::new(columns, pk, rows).ok()
+                                }
+                                RowIdentity::Ctid => {
+                                    EditSession::with_row_ids(columns, rows, page.row_ids).ok()
+                                }
+                                RowIdentity::None => None,
                             }
-                            RowIdentity::None => None,
                         };
                         this.identity = if session.is_some() {
                             identity

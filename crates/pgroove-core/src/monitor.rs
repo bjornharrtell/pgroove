@@ -1,5 +1,7 @@
 //! Server monitoring queries and session control.
 
+use std::sync::Arc;
+
 use anyhow::{Result, bail};
 use tokio_postgres::Client;
 
@@ -112,8 +114,8 @@ impl View {
     }
 }
 
-/// Fetches a monitoring view as a result set.
-pub async fn fetch(client: &Client, view: View) -> Result<ResultSet> {
+/// Fetches a monitoring view as a result set, as a handle the view can share with the grid.
+pub async fn fetch(client: &Client, view: View) -> Result<Arc<ResultSet>> {
     if view == View::Statements {
         let installed = client
             .query_opt(

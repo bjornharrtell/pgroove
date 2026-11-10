@@ -50,7 +50,7 @@ pub struct ActivityView {
     runtime: Arc<Runtime>,
     view: View,
     pane: Entity<GridPane>,
-    data: ResultSet,
+    data: Arc<ResultSet>,
     load: Load,
     auto: bool,
     notice: Option<(String, bool)>,
@@ -84,7 +84,7 @@ impl ActivityView {
             runtime,
             view: View::Sessions,
             pane,
-            data: ResultSet::default(),
+            data: Arc::default(),
             load: Load::Loading,
             auto: true,
             notice: None,
@@ -99,7 +99,7 @@ impl ActivityView {
         if self.view != view {
             self.view = view;
             self.notice = None;
-            self.data = ResultSet::default();
+            self.data = Arc::default();
             self.pane.update(cx, |p, cx| p.set_data(None, cx));
             self.refresh(cx);
         }
@@ -114,7 +114,7 @@ impl ActivityView {
     /// Points the monitor at another database's connection and reloads.
     pub(crate) fn rebind(&mut self, client: Arc<pgroove_core::Client>, cx: &mut Context<Self>) {
         self.client = client;
-        self.data = ResultSet::default();
+        self.data = Arc::default();
         self.notice = None;
         self.load = Load::Loading;
         self.pane.update(cx, |p, cx| p.set_data(None, cx));
@@ -144,7 +144,8 @@ impl ActivityView {
                 }
                 match result {
                     Ok(set) => {
-                        this.pane.update(cx, |p, cx| p.set_data(Some(&set), cx));
+                        this.pane
+                            .update(cx, |p, cx| p.set_data(Some(set.clone()), cx));
                         this.data = set;
                         this.load = Load::Ready;
                         this.reselect(keep, cx);

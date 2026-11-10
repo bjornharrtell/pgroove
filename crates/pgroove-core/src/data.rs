@@ -1,5 +1,7 @@
 //! Paged table data access for the data viewer.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio_postgres::Client;
 
@@ -112,7 +114,8 @@ pub async fn cancel_running(client: &Client) -> Result<()> {
 /// A fetched page; `has_more` is true when another page exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
-    pub data: ResultSet,
+    /// A shared handle, so the grid can show it without a copy.
+    pub data: Arc<ResultSet>,
     pub has_more: bool,
     /// `(ctid, xmin)` per row, when requested with `PageRequest::row_ids`.
     pub row_ids: Vec<(String, String)>,
@@ -125,7 +128,13 @@ pub async fn fetch_page(client: &Client, table: &TableRef, req: &PageRequest) ->
         ..req.clone()
     };
     let out = query::run(client, &build_select(table, &probe), probe.limit as usize).await?;
-    let mut data = out.sets.into_iter().next().unwrap_or_default();
+    // Freshly produced and unshared, so this takes the allocation instead of copying it.
+    let mut data = out
+        .sets
+        .into_iter()
+        .next()
+        .and_then(Arc::into_inner)
+        .unwrap_or_default();
     let has_more = data.rows.len() as u64 > req.limit;
     data.rows.truncate(req.limit as usize);
     data.truncated = false;
@@ -142,7 +151,7 @@ pub async fn fetch_page(client: &Client, table: &TableRef, req: &PageRequest) ->
     }
     data.count = data.rows.len() as u64;
     Ok(Page {
-        data,
+        data: Arc::new(data),
         has_more,
         row_ids,
     })

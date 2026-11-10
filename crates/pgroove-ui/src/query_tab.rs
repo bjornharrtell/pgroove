@@ -338,13 +338,13 @@ impl QueryTab {
             Ok(out) => {
                 self.record(sql, out.elapsed.as_millis() as u64, true);
                 self.run = RunState::Idle;
-                let set = out.last_rowset();
+                let set = out.last_rowset_shared();
                 self.bottom = if set.is_some() {
                     BottomTab::Results
                 } else {
                     BottomTab::Messages
                 };
-                // Borrow the rows instead of cloning them first: results can be large.
+                // The grid shares this tab's allocation instead of cloning the rows.
                 self.results.update(cx, |p, cx| p.set_data(set, cx));
                 self.output = Some(out);
             }

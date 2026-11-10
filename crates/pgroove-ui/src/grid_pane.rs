@@ -1,5 +1,7 @@
 //! Result grid with export actions and a cell inspector.
 
+use std::sync::Arc;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -252,8 +254,8 @@ impl GridPane {
         &self.grid
     }
 
-    /// Replaces the shown data and clears the cell selection.
-    pub fn set_data(&mut self, set: Option<&ResultSet>, cx: &mut Context<Self>) {
+    /// Replaces the shown data and clears the cell selection. The set is shared, not copied.
+    pub fn set_data(&mut self, set: Option<Arc<ResultSet>>, cx: &mut Context<Self>) {
         self.selected = None;
         self.inspected = None;
         self.grid.update(cx, |g, cx| {
@@ -435,26 +437,28 @@ impl Render for GridPane {
     }
 }
 
-fn snapshot(
-    grid: &Entity<TableState<ResultsTable>>,
-    cx: &App,
-) -> (Vec<String>, Vec<Vec<Option<String>>>) {
-    let t = grid.read(cx).delegate();
-    (t.names().to_vec(), t.rows().to_vec())
+fn snapshot(grid: &Entity<TableState<ResultsTable>>, cx: &App) -> Option<Arc<ResultSet>> {
+    grid.read(cx).delegate().data()
 }
 
 fn copy(grid: &Entity<TableState<ResultsTable>>, fmt: Format, window: &mut Window, cx: &mut App) {
-    let (names, rows) = snapshot(grid, cx);
-    if names.is_empty() {
+    let Some(set) = snapshot(grid, cx) else {
+        return;
+    };
+    if set.columns.is_empty() {
         return;
     }
-    cx.write_to_clipboard(ClipboardItem::new_string(fmt.render(&names, &rows)));
-    window.push_notification(format!("Copied {} rows", rows.len()), cx);
+    cx.write_to_clipboard(ClipboardItem::new_string(
+        fmt.render(&set.columns, &set.rows),
+    ));
+    window.push_notification(format!("Copied {} rows", set.rows.len()), cx);
 }
 
 fn save(grid: &Entity<TableState<ResultsTable>>, window: &mut Window, cx: &mut App) {
-    let (names, rows) = snapshot(grid, cx);
-    if names.is_empty() {
+    let Some(set) = snapshot(grid, cx) else {
+        return;
+    };
+    if set.columns.is_empty() {
         return;
     }
     let dir = std::env::current_dir().unwrap_or_default();
@@ -464,9 +468,9 @@ fn save(grid: &Entity<TableState<ResultsTable>>, window: &mut Window, cx: &mut A
         let Ok(Ok(Some(path))) = rx.await else {
             return;
         };
-        let text = Format::from_path(&path).render(&names, &rows);
+        let text = Format::from_path(&path).render(&set.columns, &set.rows);
         let msg = match std::fs::write(&path, text) {
-            Ok(()) => format!("Saved {} rows to {}", rows.len(), path.display()),
+            Ok(()) => format!("Saved {} rows to {}", set.rows.len(), path.display()),
             Err(e) => format!("Couldn't save: {e}"),
         };
         cx.update(|cx| {

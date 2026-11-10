@@ -1,5 +1,7 @@
 //! Result grid backed by gpui-kit's table.
 
+use std::sync::Arc;
+
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::*;
@@ -45,9 +47,9 @@ fn is_numeric(rows: &[Vec<Option<String>>], col: usize) -> bool {
 
 #[derive(Default)]
 pub struct ResultsTable {
-    names: Vec<String>,
+    /// The shown result set, shared with the tab that produced it; no rows are copied.
+    set: Option<Arc<ResultSet>>,
     columns: Vec<Column>,
-    rows: Vec<Vec<Option<String>>>,
     /// Per column: every sampled value is a number, so it is right-aligned.
     numeric: Vec<bool>,
     sortable: bool,
@@ -103,7 +105,7 @@ impl ResultsTable {
         (count > 0).then(|| {
             (
                 self.selection
-                    .to_tsv(|r, c| self.cell(r, c), &self.names, headers),
+                    .to_tsv(|r, c| self.cell(r, c), self.names(), headers),
                 count,
             )
         })
@@ -124,19 +126,29 @@ impl ResultsTable {
     pub fn row_total(&self) -> usize {
         self.session
             .as_ref()
-            .map_or(self.rows.len(), EditSession::row_count)
+            .map_or(self.row_count(), EditSession::row_count)
+    }
+
+    /// Rows in the shared result set (staged inserts excluded).
+    fn row_count(&self) -> usize {
+        self.set.as_ref().map_or(0, |s| s.rows.len())
     }
 
     pub fn names(&self) -> &[String] {
-        &self.names
+        self.set.as_deref().map_or(&[], |s| s.columns.as_slice())
     }
 
     pub fn rows(&self) -> &[Vec<Option<String>>] {
-        &self.rows
+        self.set.as_deref().map_or(&[], |s| s.rows.as_slice())
+    }
+
+    /// The shared data, for a copy or save that must not clone the rows.
+    pub fn data(&self) -> Option<Arc<ResultSet>> {
+        self.set.clone()
     }
 
     pub fn column_name(&self, ix: usize) -> Option<&str> {
-        self.names.get(ix).map(String::as_str)
+        self.names().get(ix).map(String::as_str)
     }
 
     /// Takes a pending header-click sort: `Some(None)` clears the sort.
@@ -148,12 +160,11 @@ impl ResultsTable {
         self.sorted = sorted;
     }
 
-    pub fn set(&mut self, set: Option<&ResultSet>) {
+    pub fn set(&mut self, set: Option<Arc<ResultSet>>) {
         match set {
             Some(s) => {
                 self.session = None;
                 self.selection.clear();
-                self.names = s.columns.clone();
                 self.numeric = (0..s.columns.len())
                     .map(|i| is_numeric(&s.rows, i))
                     .collect();
@@ -163,7 +174,7 @@ impl ResultsTable {
                     .enumerate()
                     .map(|(i, name)| {
                         let w = column_width(name, &s.rows, i);
-                        let mut c = Column::new(format!("c{i}"), name.clone()).width(px(w));
+                        let mut c = Column::new(format!("c{i}"), name.as_str()).width(px(w));
                         if self.numeric[i] {
                             c = c.text_right();
                         }
@@ -177,15 +188,14 @@ impl ResultsTable {
                         c
                     })
                     .collect();
-                self.rows = s.rows.clone();
+                self.set = Some(s);
             }
             None => {
                 self.session = None;
                 self.selection.clear();
-                self.names.clear();
+                self.set = None;
                 self.columns.clear();
                 self.numeric.clear();
-                self.rows.clear();
             }
         }
     }
@@ -194,7 +204,7 @@ impl ResultsTable {
         if let Some(s) = &self.session {
             return s.value(row, col);
         }
-        self.rows.get(row)?.get(col)?.as_deref()
+        self.rows().get(row)?.get(col)?.as_deref()
     }
 }
 
@@ -294,11 +304,16 @@ impl TableDelegate for ResultsTable {
 mod tests {
     use super::ResultsTable;
     use pgroove_core::query::ResultSet;
+    use std::sync::Arc;
+
+    fn shared(set: ResultSet) -> Option<Arc<ResultSet>> {
+        Some(Arc::new(set))
+    }
 
     #[test]
     fn set_and_cell() {
         let mut t = ResultsTable::default();
-        t.set(Some(&ResultSet {
+        t.set(shared(ResultSet {
             columns: vec!["a".into(), "b".into()],
             rows: vec![vec![Some("1".into()), None]],
             count: 1,
@@ -310,9 +325,11 @@ mod tests {
         assert_eq!(t.cell(5, 0), None);
         assert_eq!(t.column_name(1), Some("b"));
         assert_eq!(t.numeric, vec![true, false]);
-        assert_eq!(super::column_width("a", &t.rows, 0), 80.0);
+        assert_eq!(t.row_total(), 1);
+        assert_eq!(super::column_width("a", t.rows(), 0), 80.0);
         t.set(None);
-        assert!(t.columns.is_empty() && t.rows.is_empty());
+        assert!(t.columns.is_empty() && t.rows().is_empty() && t.names().is_empty());
+        assert_eq!(t.row_total(), 0);
         assert_eq!(t.column_name(0), None);
         assert_eq!(t.take_sort(), None);
         assert!(t.session().is_none());
@@ -321,11 +338,36 @@ mod tests {
         assert_eq!(t.sorted, Some((0, true)));
     }
 
+    /// The grid reads the very allocation the caller holds, cells included.
+    #[test]
+    fn data_is_shared_not_copied() {
+        let mut t = ResultsTable::default();
+        let set = Arc::new(ResultSet {
+            columns: vec!["a".into(), "b".into()],
+            rows: vec![
+                vec![Some("1".into()), Some("x".into())],
+                vec![Some("2".into()), None],
+            ],
+            count: 2,
+            truncated: false,
+        });
+        t.set(Some(set.clone()));
+        assert_eq!(Arc::strong_count(&set), 2, "the tab and the grid share it");
+        let held = t.data().expect("the grid keeps the set");
+        assert!(Arc::ptr_eq(&set, &held), "same allocation, not a copy");
+        assert!(std::ptr::eq(t.rows().as_ptr(), set.rows.as_ptr()));
+        assert!(std::ptr::eq(t.names().as_ptr(), set.columns.as_ptr()));
+        assert_eq!(t.cell(0, 0), Some("1"));
+        assert_eq!(t.cell(1, 1), None);
+        assert_eq!(t.cell(1, 0), Some("2"));
+        assert_eq!(t.row_total(), 2);
+    }
+
     #[test]
     fn marking_and_copying_cells() {
         use crate::selection::Mods;
         let mut t = ResultsTable::default();
-        t.set(Some(&ResultSet {
+        t.set(shared(ResultSet {
             columns: vec!["a".into(), "b".into()],
             rows: vec![
                 vec![Some("1".into()), Some("x".into())],

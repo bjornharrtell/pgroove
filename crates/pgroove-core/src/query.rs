@@ -1,5 +1,6 @@
 //! Query execution via the simple query protocol (multi-statement, text values).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -22,16 +23,27 @@ pub struct ResultSet {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueryOutput {
-    pub sets: Vec<ResultSet>,
+    /// Shared handles: a view can keep one allocation and hold a cheap reference to it.
+    pub sets: Vec<Arc<ResultSet>>,
     pub elapsed: Duration,
     /// The row limit that applied to this run, if it was a limited run.
     pub limit: Option<usize>,
 }
 
 impl QueryOutput {
+    /// Index of the last statement that returned columns.
+    fn last_rowset_ix(&self) -> Option<usize> {
+        self.sets.iter().rposition(|s| !s.columns.is_empty())
+    }
+
     /// The last statement that returned columns.
     pub fn last_rowset(&self) -> Option<&ResultSet> {
-        self.sets.iter().rev().find(|s| !s.columns.is_empty())
+        self.sets.get(self.last_rowset_ix()?).map(|s| &**s)
+    }
+
+    /// The same set as a shared handle, for a view that keeps it.
+    pub fn last_rowset_shared(&self) -> Option<Arc<ResultSet>> {
+        self.sets.get(self.last_rowset_ix()?).cloned()
     }
 
     /// One summary line per statement.
@@ -85,6 +97,11 @@ pub fn is_clipped(v: &str) -> bool {
         .and_then(|i| v[i + CLIP_MARK.len()..].strip_prefix(": "))
         .and_then(|rest| rest.strip_suffix(" bytes]"))
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Wraps produced sets once, so they can be handed out without copying.
+fn shared(sets: Vec<ResultSet>) -> Vec<Arc<ResultSet>> {
+    sets.into_iter().map(Arc::new).collect()
 }
 
 /// Folds simple-query messages into result sets.
@@ -188,7 +205,7 @@ pub async fn run(client: &Client, sql: &str, max_rows: usize) -> Result<QueryOut
         .await
         .map_err(|e| anyhow::Error::new(QueryError::from_driver(&e)))?;
     Ok(QueryOutput {
-        sets: collect(messages, max_rows),
+        sets: shared(collect(messages, max_rows)),
         elapsed: start.elapsed(),
         limit: None,
     })
@@ -263,7 +280,7 @@ pub async fn run_limited(client: &Client, sql: &str, limit: usize) -> Result<Que
         sets.extend(run_one(client, &st.text, limit, char_start).await?);
     }
     Ok(QueryOutput {
-        sets,
+        sets: shared(sets),
         elapsed: start.elapsed(),
         limit: Some(limit),
     })
@@ -330,10 +347,30 @@ mod tests {
 
     fn out(sets: Vec<ResultSet>) -> QueryOutput {
         QueryOutput {
-            sets,
+            sets: shared(sets),
             elapsed: Duration::from_millis(7),
             limit: None,
         }
+    }
+
+    #[test]
+    fn result_sets_are_shared() {
+        let o = out(vec![ResultSet {
+            columns: vec!["a".into()],
+            rows: vec![vec![Some("1".into())]],
+            count: 1,
+            truncated: false,
+        }]);
+        let set = o.last_rowset().unwrap();
+        assert!(
+            std::ptr::eq(set, o.sets[0].as_ref()),
+            "the rowset is read through the shared handle"
+        );
+        assert_eq!(set.rows[0][0].as_deref(), Some("1"));
+        // Holding the set elsewhere keeps the same allocation.
+        let held = o.sets[0].clone();
+        assert!(Arc::ptr_eq(&held, &o.sets[0]));
+        assert_eq!(held.rows[0][0].as_deref(), Some("1"));
     }
 
     #[test]
@@ -521,12 +558,12 @@ mod tests {
     #[test]
     fn limit_messages_say_so() {
         let o = QueryOutput {
-            sets: vec![ResultSet {
+            sets: shared(vec![ResultSet {
                 columns: vec!["a".into()],
                 rows: vec![vec![None]; 2],
                 count: 2,
                 truncated: true,
-            }],
+            }]),
             elapsed: Duration::from_millis(1),
             limit: Some(2),
         };
