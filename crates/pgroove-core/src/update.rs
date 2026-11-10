@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 pub use reqwest::Client as HttpClient;
+use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 pub use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -79,34 +81,94 @@ pub fn http_client() -> HttpClient {
         .unwrap_or_default()
 }
 
+/// The outcome of a latest-release check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Latest {
+    /// GitHub answered with a release and, when it sent one, its ETag for the next check.
+    Release {
+        release: Release,
+        etag: Option<String>,
+    },
+    /// GitHub answered 304: nothing changed since the ETag the caller sent.
+    NotModified,
+}
+
 /// Fetches the latest release from `url` (normally [`LATEST_RELEASE_URL`]).
-pub async fn fetch_latest(http: &HttpClient, url: &str) -> Result<Release> {
-    let api: ApiRelease = http
+///
+/// Passing the `etag` of an earlier answer makes the request conditional, so an
+/// unchanged release costs a 304 and no body.
+pub async fn fetch_latest(http: &HttpClient, url: &str, etag: Option<&str>) -> Result<Latest> {
+    let mut request = http
         .get(url)
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "application/vnd.github+json");
+    if let Some(etag) = etag {
+        request = request.header("If-None-Match", etag);
+    }
+    let response = request
         .send()
-        .await?
+        .await
+        .context("asking GitHub for the latest release")?;
+    let status = response.status();
+    let new_etag = response
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if status == StatusCode::NOT_MODIFIED {
+        return Ok(Latest::NotModified);
+    }
+    if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(rate_limited(status, response.headers()));
+    }
+    let api: ApiRelease = response
         .error_for_status()
         .context("asking GitHub for the latest release")?
         .json()
         .await?;
     let version = parse_tag(&api.tag_name)
         .ok_or_else(|| anyhow!("release tag {:?} is not a version", api.tag_name))?;
-    Ok(Release {
-        version,
-        tag: api.tag_name,
-        notes: api.body.unwrap_or_default(),
-        page: api.html_url,
-        assets: api
-            .assets
-            .into_iter()
-            .map(|a| Asset {
-                name: a.name,
-                url: a.browser_download_url,
-                size: a.size,
-            })
-            .collect(),
+    Ok(Latest::Release {
+        release: Release {
+            version,
+            tag: api.tag_name,
+            notes: api.body.unwrap_or_default(),
+            page: api.html_url,
+            assets: api
+                .assets
+                .into_iter()
+                .map(|a| Asset {
+                    name: a.name,
+                    url: a.browser_download_url,
+                    size: a.size,
+                })
+                .collect(),
+        },
+        etag: new_etag,
     })
+}
+
+/// The error for a rate-limited answer, naming when the limit resets if GitHub said so.
+fn rate_limited(status: StatusCode, headers: &HeaderMap) -> anyhow::Error {
+    let reset = headers
+        .get("X-RateLimit-Reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .and_then(|reset| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|now| reset.saturating_sub(now.as_secs()))
+        });
+    let wait = reset.map(|secs| {
+        let minutes = secs.div_ceil(60).max(1);
+        let plural = if minutes == 1 { "" } else { "s" };
+        format!(" (the limit resets in about {minutes} minute{plural})")
+    });
+    anyhow!(
+        "GitHub is rate limiting update checks (HTTP {}); try again later{}",
+        status.as_u16(),
+        wait.unwrap_or_default()
+    )
 }
 
 /// How an asset is packaged.
@@ -499,9 +561,29 @@ mod tests {
         assert!(replace_file(Path::new("/"), b"x").is_err());
     }
 
+    /// Writes one HTTP/1.1 response and closes the socket.
+    async fn reply(
+        mut sock: tokio::net::TcpStream,
+        status: &str,
+        headers: &[(&str, String)],
+        body: Vec<u8>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let mut head = format!("HTTP/1.1 {status}\r\n");
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if !body.is_empty() {
+            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        head.push_str("Connection: close\r\n\r\n");
+        let _ = sock.write_all(head.as_bytes()).await;
+        let _ = sock.write_all(&body).await;
+    }
+
     /// Serves canned responses by path on a local port.
     async fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -519,12 +601,61 @@ mod tests {
                         Some((_, b)) => ("200 OK", b.clone()),
                         None => ("404 Not Found", Vec::new()),
                     };
-                    let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = sock.write_all(head.as_bytes()).await;
-                    let _ = sock.write_all(&body).await;
+                    reply(sock, status, &[], body).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Serves one canned response to every request.
+    async fn serve_canned(
+        status: &'static str,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let headers = headers.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    reply(sock, status, &headers, body).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Serves `body` with `etag`, or 304 when the request sends `If-None-Match: <etag>`.
+    async fn serve_conditional(etag: &'static str, body: Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let conditional = request.contains(&format!("if-none-match: {etag}"));
+                    let (status, body) = if conditional {
+                        ("304 Not Modified", Vec::new())
+                    } else {
+                        ("200 OK", body)
+                    };
+                    reply(sock, status, &[("ETag", etag.to_string())], body).await;
                 });
             }
         });
@@ -560,7 +691,14 @@ mod tests {
         });
         let api = serve(vec![("/latest", latest.to_string().into_bytes())]).await;
         let http = http_client();
-        let rel = fetch_latest(&http, &format!("{api}/latest")).await.unwrap();
+        let Latest::Release { release: rel, etag } =
+            fetch_latest(&http, &format!("{api}/latest"), None)
+                .await
+                .unwrap()
+        else {
+            panic!("expected a release");
+        };
+        assert_eq!(etag, None, "this server sends no ETag");
         assert_eq!(rel.version, Version::new(9, 9, 9));
         assert_eq!(rel.notes, "notes");
         assert!(rel.is_newer_than(&current_version()));
@@ -588,11 +726,72 @@ mod tests {
                 .contains("no published checksum")
         );
         assert!(
-            fetch_latest(&http, &format!("{api}/missing"))
+            fetch_latest(&http, &format!("{api}/missing"), None)
                 .await
                 .is_err()
         );
         let notver = serve(vec![("/x", br#"{"tag_name":"nightly"}"#.to_vec())]).await;
-        assert!(fetch_latest(&http, &format!("{notver}/x")).await.is_err());
+        assert!(
+            fetch_latest(&http, &format!("{notver}/x"), None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_is_explained() {
+        let http = http_client();
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        for (status, code) in [
+            ("403 Forbidden", StatusCode::FORBIDDEN),
+            ("429 Too Many Requests", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let base = serve_canned(
+                status,
+                vec![("X-RateLimit-Reset", reset.to_string())],
+                Vec::new(),
+            )
+            .await;
+            let err = format!("{:#}", fetch_latest(&http, &base, None).await.unwrap_err());
+            assert!(err.contains("rate limiting"), "{err}");
+            assert!(err.contains(&format!("HTTP {}", code.as_u16())), "{err}");
+            assert!(err.contains("try again later"), "{err}");
+            assert!(err.contains("resets in about 10 minutes"), "{err}");
+        }
+        let base = serve_canned("403 Forbidden", Vec::new(), Vec::new()).await;
+        let err = format!("{:#}", fetch_latest(&http, &base, None).await.unwrap_err());
+        assert_eq!(
+            err,
+            "GitHub is rate limiting update checks (HTTP 403); try again later"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_check_reuses_the_etag() {
+        let body = serde_json::json!({
+            "tag_name": "v9.9.9",
+            "body": "notes",
+            "assets": []
+        })
+        .to_string()
+        .into_bytes();
+        let base = serve_conditional("\"v9\"", body).await;
+        let http = http_client();
+        let Latest::Release { release, etag } = fetch_latest(&http, &base, None).await.unwrap()
+        else {
+            panic!("expected a release");
+        };
+        assert_eq!(release.version, Version::new(9, 9, 9));
+        assert_eq!(release.notes, "notes");
+        assert_eq!(etag.as_deref(), Some("\"v9\""));
+        assert_eq!(
+            fetch_latest(&http, &base, etag.as_deref()).await.unwrap(),
+            Latest::NotModified,
+            "a 304 is neither a failure nor a new release"
+        );
     }
 }

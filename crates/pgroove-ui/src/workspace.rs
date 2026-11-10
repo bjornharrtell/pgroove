@@ -197,6 +197,8 @@ pub struct Workspace {
     sidebar_scroll: UniformListScrollHandle,
     cursor: Option<usize>,
     update: UpdateState,
+    /// ETag of the last release answer, so a re-check can be conditional.
+    update_etag: Option<String>,
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
     /// The one-time DBeaver import offer is still to be made (on the first render).
@@ -356,6 +358,7 @@ impl Workspace {
             next_session: 1,
             last_session: None,
             update: UpdateState::Idle,
+            update_etag: None,
             tree_filter,
             main_split,
             sidebar_width,
@@ -1372,31 +1375,53 @@ impl Workspace {
         self.update = UpdateState::Checking;
         cx.notify();
         let http = self.http.clone();
+        let etag = self.update_etag.clone();
         // PGROOVE_UPDATE_URL points the check at another release feed (for testing or mirrors).
         let url = std::env::var("PGROOVE_UPDATE_URL")
             .unwrap_or_else(|_| update::LATEST_RELEASE_URL.to_string());
         let task = self
             .runtime
-            .spawn(async move { update::fetch_latest(&http, &url).await });
+            .spawn(async move { update::fetch_latest(&http, &url, etag.as_deref()).await });
         cx.spawn_in(window, async move |this, cx| {
             let result = flatten(task.await);
             this.update_in(cx, move |this, window, cx| {
-                this.update = UpdateState::Idle;
+                let previous = std::mem::replace(&mut this.update, UpdateState::Idle);
                 match result {
-                    Ok(rel) if rel.is_newer_than(&update::current_version()) => {
-                        if manual {
+                    Ok(update::Latest::Release { release, etag }) => {
+                        this.update_etag = etag;
+                        if release.is_newer_than(&update::current_version()) {
+                            if manual {
+                                window.push_notification(
+                                    format!("Version {} is available", release.version),
+                                    cx,
+                                );
+                            }
+                            this.update = UpdateState::Available(release);
+                        } else if manual {
                             window.push_notification(
-                                format!("Version {} is available", rel.version),
+                                format!(
+                                    "You're up to date (version {})",
+                                    update::current_version()
+                                ),
                                 cx,
                             );
                         }
-                        this.update = UpdateState::Available(rel);
                     }
-                    Ok(_) if manual => window.push_notification(
-                        format!("You're up to date (version {})", update::current_version()),
-                        cx,
-                    ),
-                    Ok(_) => {}
+                    // GitHub saw the ETag we sent: nothing changed since the last check.
+                    Ok(update::Latest::NotModified) => {
+                        if matches!(previous, UpdateState::Available(_)) {
+                            // The offered release is still the latest one.
+                            this.update = previous;
+                        } else if manual {
+                            window.push_notification(
+                                format!(
+                                    "You're up to date (version {})",
+                                    update::current_version()
+                                ),
+                                cx,
+                            );
+                        }
+                    }
                     Err(e) => {
                         log::warn!("update check failed: {e}");
                         if manual {
