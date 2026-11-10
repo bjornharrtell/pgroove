@@ -94,9 +94,11 @@ pub fn tls_connector(mode: SslMode) -> Result<MakeRustlsConnect> {
     Ok(MakeRustlsConnect::new(config))
 }
 
-/// Connects and spawns the connection driver task on the current tokio runtime.
-/// Returns the client and the server version string.
-pub async fn connect(
+/// Upper bound on the whole connect attempt, including the version query, so a peer
+/// that accepts TCP but never answers cannot leave a session connecting forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn connect_attempt(
     profile: &ConnectionProfile,
     password: Option<&str>,
 ) -> Result<(Client, String)> {
@@ -112,6 +114,18 @@ pub async fn connect(
     });
     let row = client.query_one("show server_version", &[]).await?;
     Ok((client, row.get(0)))
+}
+
+/// Connects and spawns the connection driver task on the current tokio runtime.
+/// Returns the client and the server version string.
+pub async fn connect(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+) -> Result<(Client, String)> {
+    let label = profile.label();
+    tokio::time::timeout(CONNECT_TIMEOUT, connect_attempt(profile, password))
+        .await
+        .map_err(|_| anyhow::anyhow!("connecting to {label} timed out after {CONNECT_TIMEOUT:?}"))?
 }
 
 /// Test helper: connects using `PGROOVE_TEST_PG=host:port:user:password:db`, if set.
@@ -183,6 +197,49 @@ mod tests {
         };
         let err = connect(&p, None).await.unwrap_err();
         assert!(err.to_string().contains("connecting to"));
+    }
+
+    /// Binds a listener that accepts one connection and then never answers.
+    async fn silent_peer() -> ConnectionProfile {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        ConnectionProfile {
+            name: "stall".into(),
+            host: "127.0.0.1".into(),
+            port,
+            user: "u".into(),
+            database: "d".into(),
+            ssl: SslMode::Disable,
+            ..Default::default()
+        }
+    }
+
+    /// A peer that never answers the startup handshake must time out, not hang.
+    #[tokio::test(start_paused = true)]
+    async fn connect_stalled_peer_times_out() {
+        let p = silent_peer().await;
+        let err = connect(&p, None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&p.label()), "names the connection: {msg}");
+        assert!(
+            msg.contains(&format!("timed out after {CONNECT_TIMEOUT:?}")),
+            "says it timed out: {msg}"
+        );
+    }
+
+    /// The bound is short enough that a stalled connect fails, and the test ends, quickly.
+    #[tokio::test(start_paused = true)]
+    async fn connect_stalled_peer_fails_quickly() {
+        let p = silent_peer().await;
+        let started = std::time::Instant::now();
+        assert!(connect(&p, None).await.is_err());
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+        assert!(CONNECT_TIMEOUT <= Duration::from_secs(60));
     }
 
     /// Runs against a live server when `PGROOVE_TEST_PG=host:port:user:password:db` is set.
