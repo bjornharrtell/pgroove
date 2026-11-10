@@ -48,6 +48,8 @@ fn binding(name: &str, keystroke: &str, cx: &App) -> Option<KeyBinding> {
     KeyBinding::load(keystroke, action, predicate, false, None, cx).ok()
 }
 
+gpui_kit::actions!(app, [Quit, CloseWindow]);
+
 /// Registers key bindings (defaults plus the user's `keybindings.toml`); call once at startup.
 pub fn init(cx: &mut App) {
     cx.set_global(mode::ReadOnlyMode(true));
@@ -74,6 +76,18 @@ pub fn init(cx: &mut App) {
         })
         .collect();
     cx.bind_keys(bindings);
+    // Always a way to leave, whatever the window frame shows.
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+    ]);
+    cx.set_menus([gpui_kit::Menu {
+        name: "pgroove".into(),
+        items: vec![gpui_kit::MenuItem::action("Quit pgroove", Quit)],
+        disabled: false,
+    }]);
     // Arrow keys move through the sidebar tree while it has focus.
     cx.bind_keys([
         KeyBinding::new("up", workspace::SidebarUp, Some("Sidebar")),

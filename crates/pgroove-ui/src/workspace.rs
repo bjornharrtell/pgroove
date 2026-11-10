@@ -2687,6 +2687,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
+            .on_action(|_: &crate::CloseWindow, window, _| window.remove_window())
             .rounded_tl(radii.top_left)
             .rounded_tr(radii.top_right)
             .rounded_bl(radii.bottom_left)
