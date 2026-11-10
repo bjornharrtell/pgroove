@@ -2564,9 +2564,19 @@ impl Workspace {
                     .child(body)
                     // The list scrolls with the wheel; the bar shows how much there is.
                     .when(!empty, |d| {
+                        use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
                         d.child(
-                            gpui_kit::component::scroll::Scrollbar::vertical(&self.sidebar_scroll)
-                                .viewport_from_layout(),
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(Scrollbar::width())
+                                .child(
+                                    Scrollbar::vertical(&self.sidebar_scroll)
+                                        .mode(ScrollbarMode::Always)
+                                        .viewport_from_layout(),
+                                ),
                         )
                     }),
             )
