@@ -2399,21 +2399,21 @@ impl Workspace {
         let label = if label.is_empty() { "Ungrouped" } else { label };
         // Looks like an accordion header (title left, chevron right, ruled between groups);
         // the rows stay in the virtualized list, which an accordion's content could not be.
-        // The rule is inset from the pane's edges and omitted above the first group.
+        // The list assumes every row is the same height (26px), so the header keeps that
+        // height too; it is set apart by a tinted, inset block rather than a rule.
         div()
+            .h(px(26.))
             .flex_shrink_0()
             .px_2()
             .child(
                 h_flex()
                     .id(("group", ix))
-                    .h(px(30.))
-                    .px_1()
+                    .size_full()
+                    .px_2()
                     .gap_2()
                     .items_center()
                     .rounded(theme.radius)
-                    .when(ix > 0, |d| {
-                        d.border_t_1().border_color(theme.sidebar_border)
-                    })
+                    .bg(theme.foreground.opacity(0.06))
                     .cursor_pointer()
                     .hover(move |d| d.bg(hover))
                     .child(
