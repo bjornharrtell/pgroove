@@ -2582,7 +2582,7 @@ impl Workspace {
             .child(
                 div()
                     .px_2()
-                    .pb_1()
+                    .pb_2()
                     .child(Input::new(&self.tree_filter).small()),
             )
             .child(
