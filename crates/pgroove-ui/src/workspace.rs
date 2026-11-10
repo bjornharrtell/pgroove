@@ -2401,14 +2401,18 @@ impl Workspace {
         // the rows stay in the virtualized list, which an accordion's content could not be.
         // The list assumes every row is the same height (26px), so the header keeps that
         // height too; it is set apart by a tinted, inset block rather than a rule.
+        // The block sits at the bottom of the row, leaving a gap above it between groups.
         div()
             .h(px(26.))
             .flex_shrink_0()
+            .flex()
+            .items_end()
             .px_2()
             .child(
                 h_flex()
                     .id(("group", ix))
-                    .size_full()
+                    .w_full()
+                    .h(px(20.))
                     .px_2()
                     .gap_2()
                     .items_center()
