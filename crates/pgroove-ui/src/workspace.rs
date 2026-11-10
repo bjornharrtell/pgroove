@@ -702,6 +702,21 @@ impl Workspace {
         let Some(client) = self.client_of(id) else {
             return;
         };
+        let wanted = self
+            .session(id)
+            .and_then(|s| {
+                self.store
+                    .profiles()
+                    .iter()
+                    .find(|p| p.name == s.profile.name)
+            })
+            .is_none_or(|p| p.show_all_databases);
+        if !wanted {
+            if let Some(s) = self.session_mut(id) {
+                s.databases = None;
+            }
+            return;
+        }
         let task = self
             .runtime
             .spawn(async move { pgroove_core::catalog::databases(&client).await });
@@ -1787,7 +1802,14 @@ impl Workspace {
                         });
                     match result {
                         Ok(()) => {
-                            this.update(cx, |_, cx| cx.notify());
+                            this.update(cx, |ws, cx| {
+                                // The "all databases" choice may have changed.
+                                let ids: Vec<usize> = ws.ready_sessions().map(|s| s.id).collect();
+                                for id in ids {
+                                    ws.load_databases(id, cx);
+                                }
+                                cx.notify()
+                            });
                             true
                         }
                         Err(e) => {
@@ -2220,7 +2242,7 @@ impl Workspace {
             }
             let mut names: std::collections::BTreeSet<String> =
                 open.iter().map(|s| s.profile.database.clone()).collect();
-            for s in &open {
+            for s in open.iter().filter(|_| p.show_all_databases) {
                 if let Some(dbs) = &s.databases {
                     names.extend(dbs.iter().cloned());
                 }

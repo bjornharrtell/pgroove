@@ -120,6 +120,17 @@ pub struct ConnectionProfile {
     /// Marker color shown next to the connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<ProfileColor>,
+    /// List every database of the server in the sidebar, not only the ones opened.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub show_all_databases: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 impl Default for ConnectionProfile {
@@ -133,6 +144,7 @@ impl Default for ConnectionProfile {
             ssl: SslMode::default(),
             group: String::new(),
             color: None,
+            show_all_databases: true,
         }
     }
 }
@@ -340,6 +352,26 @@ mod tests {
         assert_eq!(back, p);
         let plain = toml::to_string(&ConnectionProfile::default()).unwrap();
         assert!(!plain.contains("group") && !plain.contains("color"));
+        assert!(!plain.contains("show_all_databases"));
+        let few = ConnectionProfile {
+            show_all_databases: false,
+            ..Default::default()
+        };
+        let text = toml::to_string(&few).unwrap();
+        assert!(text.contains("show_all_databases = false"));
+        assert!(
+            !toml::from_str::<ConnectionProfile>(&text)
+                .unwrap()
+                .show_all_databases
+        );
+        let old: ConnectionProfile = toml::from_str(
+            "name = \"a\"\nhost = \"h\"\nport = 1\ndatabase = \"d\"\nuser = \"u\"\n",
+        )
+        .unwrap();
+        assert!(
+            old.show_all_databases,
+            "saved connections keep listing every database"
+        );
         assert_eq!(ProfileColor::ALL.len(), 8);
         assert!(
             ProfileColor::ALL

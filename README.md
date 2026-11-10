@@ -16,7 +16,7 @@ Requires PostgreSQL 13 or newer on the server.
   ("Import connections from DBeaver…"), or point it at a DBeaver project or workspace folder
   anywhere on disk ("Import connections from a DBeaver project folder…"). DBeaver's files are
   only read.
-- **Schema browser:** a search box finds tables, views and functions across every schema; lists every database on the server (click to open or close one; several can be open at once, across connections), then a lazy tree of schemas grouped into tables, views, sequences, types and functions, tables, views, sequences, types, functions and
+- **Schema browser:** a search box finds tables, views and functions across every schema; lists every database on the server (optional per connection; click to open or close one; several can be open at once, across connections), then a lazy tree of schemas grouped into tables, views, sequences, types and functions, tables, views, sequences, types, functions and
   extensions, with context menus (open data or structure, copy name, show definition).
 - **SQL editor:** Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`

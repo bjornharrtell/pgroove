@@ -171,6 +171,12 @@ pub fn parse_data_sources(json: &str, credentials: Option<&Value>) -> Result<Fou
             .unwrap_or_else(|| format!("{}/{}", p.host, p.database));
         p.group = text(c, "folder");
         p.color = color_for(&text(conf, "type"));
+        // DBeaver lists only the connected database unless this option is on.
+        p.show_all_databases = conf
+            .get("provider-properties")
+            .and_then(|v| v.get("@dbeaver-show-non-default-db@"))
+            .and_then(Value::as_str)
+            == Some("true");
         let cred = credentials
             .and_then(|v| v.get(id))
             .and_then(|v| v.get("#connection"));
@@ -317,7 +323,8 @@ mod tests {
       "connections": {
         "a": {"provider":"postgresql","name":"docker 5433","save-password":true,"folder":"Local",
               "configuration":{"host":"localhost","port":"5432","database":"postgres",
-              "url":"jdbc:postgresql://db.example:5433/shop?sslmode=require","configurationType":"URL","type":"prod"}},
+              "url":"jdbc:postgresql://db.example:5433/shop?sslmode=require","configurationType":"URL","type":"prod",
+              "provider-properties":{"@dbeaver-show-non-default-db@":"true"}}},
         "b": {"provider":"postgresql","name":"manual","save-password":true,
               "configuration":{"host":"h2","port":"6543","database":"","configurationType":"MANUAL","type":"dev"}},
         "c": {"provider":"mysql","name":"other","configuration":{"host":"x"}},
@@ -361,6 +368,7 @@ mod tests {
         assert_eq!((b.profile.host.as_str(), b.profile.port), ("h2", 6543));
         assert_eq!(b.profile.database, "postgres");
         assert_eq!(b.profile.user, "bob");
+        assert!(a.profile.show_all_databases && !b.profile.show_all_databases);
         assert_eq!(b.password, None);
         assert_eq!(b.note.as_deref(), Some("no saved password could be read"));
     }

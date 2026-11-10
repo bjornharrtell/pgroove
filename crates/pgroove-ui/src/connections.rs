@@ -1,6 +1,7 @@
 //! Connection form dialog.
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
@@ -21,6 +22,7 @@ pub struct ConnectionForm {
     ssl: Entity<SslMode>,
     group: Entity<InputState>,
     color: Entity<Option<ProfileColor>>,
+    show_all: Entity<bool>,
 }
 
 /// Callback for the dialog's Test connection button.
@@ -71,6 +73,7 @@ impl ConnectionForm {
             ssl: cx.new(|_| profile.ssl),
             group: field(window, cx, &profile.group, "e.g. Work or Production", false),
             color: cx.new(|_| profile.color),
+            show_all: cx.new(|_| profile.show_all_databases),
         }
     }
 
@@ -111,6 +114,7 @@ impl ConnectionForm {
                 ssl: *self.ssl.read(cx),
                 group: self.group.read(cx).value().trim().to_string(),
                 color: *self.color.read(cx),
+                show_all_databases: *self.show_all.read(cx),
             },
             password: self.password.read(cx).value().to_string(),
         }
@@ -220,6 +224,18 @@ impl ConnectionForm {
                     .child(div().w(px(90.)).child(row("Port", &self.port))),
             )
             .child(row("Database", &self.database))
+            .child(
+                Checkbox::new("show-all-databases")
+                    .label("List all databases of the server in the sidebar")
+                    .checked(*self.show_all.read(cx))
+                    .on_click({
+                        let show_all = self.show_all.clone();
+                        move |on, window, cx| {
+                            show_all.update(cx, |v, _| *v = *on);
+                            window.refresh();
+                        }
+                    }),
+            )
             .child(row("User", &self.user))
             .child(row("Password", &self.password))
             .child(h_flex().gap_2().child(ssl_button).child(test))
