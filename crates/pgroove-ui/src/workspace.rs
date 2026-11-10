@@ -1179,6 +1179,7 @@ impl Workspace {
             RefreshTree => self.refresh_all(cx),
             NewConnection => self.open_form(None, window, cx),
             ImportDbeaver => self.offer_dbeaver_import(false, window, cx),
+            ImportDbeaverFrom => self.import_dbeaver_from_folder(window, cx),
             Connect(name) => {
                 if let Some(p) = self
                     .store
@@ -1616,17 +1617,61 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let found = pgroove_core::import_dbeaver::detect();
+        if self.show_dbeaver_dialog(found, !first_time, window, cx) && first_time {
+            self.settings.dbeaver_import_offered = true;
+            self.save_settings();
+        }
+    }
+
+    /// Lets the user pick a DBeaver project (or workspace) folder anywhere, then offers its
+    /// connections.
+    fn import_dbeaver_from_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a DBeaver project folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                let projects = pgroove_core::import_dbeaver::projects_in(&path);
+                if projects.is_empty() {
+                    window.push_notification(
+                        format!("No DBeaver connection files found in {}", path.display()),
+                        cx,
+                    );
+                    return;
+                }
+                let found = pgroove_core::import_dbeaver::load_projects(&projects);
+                this.show_dbeaver_dialog(found, true, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the import dialog for what is new in `found`; false (after a notice when
+    /// `report`) when there is nothing to import.
+    fn show_dbeaver_dialog(
+        &mut self,
+        found: pgroove_core::import_dbeaver::Found,
+        report: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let candidates =
             pgroove_core::import_dbeaver::only_new(found.candidates, self.store.profiles());
         if candidates.is_empty() {
-            if !first_time {
+            if report {
                 window.push_notification("No new DBeaver connections found to import", cx);
             }
-            return;
-        }
-        if first_time {
-            self.settings.dbeaver_import_offered = true;
-            self.save_settings();
+            return false;
         }
         let state = cx.new(|_| crate::dbeaver_dialog::ImportState::new(candidates));
         let this = cx.entity();
@@ -1658,6 +1703,7 @@ impl Workspace {
                     true
                 })
         });
+        true
     }
 
     /// Saves imported connections (and their passwords); returns how many went in and what failed.

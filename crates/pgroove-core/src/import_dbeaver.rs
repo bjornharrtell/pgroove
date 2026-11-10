@@ -223,11 +223,47 @@ pub fn load_project(dir: &Path) -> Result<Found> {
     Ok(all)
 }
 
+/// The `.dbeaver` folders a user-chosen path stands for: a project folder, its `.dbeaver`
+/// folder, a `data-sources*.json` file, or a workspace holding several projects.
+pub fn projects_in(path: &Path) -> Vec<PathBuf> {
+    let has_sources = |d: &Path| !data_source_files(d).is_empty();
+    let path = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    if has_sources(path) {
+        return vec![path.to_path_buf()];
+    }
+    let mut out = Vec::new();
+    for base in [path.to_path_buf(), path.join("workspace6")] {
+        if has_sources(&base.join(".dbeaver")) {
+            out.push(base.join(".dbeaver"));
+        }
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for e in entries.flatten() {
+                let dir = e.path().join(".dbeaver");
+                if has_sources(&dir) {
+                    out.push(dir);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Everything importable from every DBeaver project on this machine.
 pub fn detect() -> Found {
+    load_projects(&find_projects())
+}
+
+/// Everything importable from the given `.dbeaver` folders.
+pub fn load_projects(dirs: &[PathBuf]) -> Found {
     let mut all = Found::default();
-    for dir in find_projects() {
-        match load_project(&dir) {
+    for dir in dirs {
+        match load_project(dir) {
             Ok(f) => {
                 all.candidates.extend(f.candidates);
                 all.skipped += f.skipped;
@@ -393,6 +429,33 @@ mod tests {
         );
         let names: Vec<&str> = out.iter().map(|c| c.profile.name.as_str()).collect();
         assert_eq!(names, ["taken (2)", "taken (3)"]);
+    }
+
+    #[test]
+    fn resolves_chosen_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("workspace6/General/.dbeaver");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("data-sources.json"), SOURCES).unwrap();
+        let other = root.path().join("Other/.dbeaver");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("data-sources-2.json"), SOURCES).unwrap();
+        // The .dbeaver folder, a file in it, the project, a workspace and the data root.
+        assert_eq!(projects_in(&proj), vec![proj.clone()]);
+        assert_eq!(
+            projects_in(&proj.join("data-sources.json")),
+            vec![proj.clone()]
+        );
+        assert_eq!(projects_in(proj.parent().unwrap()), vec![proj.clone()]);
+        assert_eq!(
+            projects_in(&root.path().join("workspace6")),
+            vec![proj.clone()]
+        );
+        assert_eq!(projects_in(root.path()), vec![other.clone(), proj.clone()]);
+        assert!(projects_in(&root.path().join("nothing")).is_empty());
+        let all = load_projects(&projects_in(root.path()));
+        assert_eq!(all.candidates.len(), 4);
+        assert_eq!(all.skipped, 4);
     }
 
     #[test]

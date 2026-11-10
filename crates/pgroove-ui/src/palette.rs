@@ -17,6 +17,7 @@ pub enum PaletteCommand {
     RefreshTree,
     NewConnection,
     ImportDbeaver,
+    ImportDbeaverFrom,
     Connect(String),
     Disconnect,
     CheckUpdates,
@@ -117,6 +118,11 @@ pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup>
             ImportDbeaver,
             "Import connections from DBeaver…",
             &["dbeaver", "migrate"],
+        ),
+        entry(
+            ImportDbeaverFrom,
+            "Import connections from a DBeaver project folder…",
+            &["dbeaver", "migrate", "workspace", "folder"],
         ),
     ];
     conns.extend(
@@ -242,6 +248,7 @@ mod tests {
             [
                 "New connection…",
                 "Import connections from DBeaver…",
+                "Import connections from a DBeaver project folder…",
                 "Connect to a"
             ]
         );
@@ -257,7 +264,11 @@ mod tests {
         assert_eq!(titles(&g, 1)[0], "Block writes (turn on read-only)");
         assert_eq!(
             titles(&g, 2),
-            ["New connection…", "Import connections from DBeaver…"]
+            [
+                "New connection…",
+                "Import connections from DBeaver…",
+                "Import connections from a DBeaver project folder…"
+            ]
         );
         assert_eq!(
             titles(&g, 4),
@@ -297,6 +308,10 @@ mod tests {
         assert_eq!(command_at(&g, 2, 1), Some(PaletteCommand::ImportDbeaver));
         assert_eq!(
             command_at(&g, 2, 2),
+            Some(PaletteCommand::ImportDbeaverFrom)
+        );
+        assert_eq!(
+            command_at(&g, 2, 3),
             Some(PaletteCommand::Connect("x".into()))
         );
         assert_eq!(command_at(&g, 9, 0), None);
