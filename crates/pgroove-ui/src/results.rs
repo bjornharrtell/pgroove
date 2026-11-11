@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::edit::{EditSession, InsertValue};
 use pgroove_core::query::ResultSet;
 
-use crate::selection::{CellSelection, Mods};
+use crate::selection::{CellSelection, Marking, Mods};
 
 /// Characters of a cell drawn in the grid; the rest is in the inspector.
 const MAX_CELL_CHARS: usize = 300;
@@ -25,6 +26,17 @@ enum Shown<'a> {
 
 /// Rows looked at when sizing and typing a column.
 const SAMPLE_ROWS: usize = 100;
+
+/// Columns the kit draws before the data: the row-number gutter. The kit's own column
+/// indexes are the data's plus this; everything outside this module uses data indexes,
+/// except where a kit index is passed in (`cell_selected`) or out (`set_selected_cell`).
+pub const GUTTER: usize = 1;
+
+/// Pixel width of the row-number gutter for `rows` rows.
+fn gutter_width(rows: usize) -> f32 {
+    let digits = rows.max(1).to_string().len() as f32;
+    (digits * 8.0 + 24.0).max(44.0)
+}
 
 /// Pixel width for a column: wide enough for its header and sampled values.
 fn column_width(name: &str, rows: &[Vec<Option<String>>], col: usize) -> f32 {
@@ -60,6 +72,8 @@ pub struct ResultsTable {
     /// The shown result set, shared with the tab that produced it; no rows are copied.
     set: Option<Arc<ResultSet>>,
     columns: Vec<Column>,
+    /// Pixel width of the row-number gutter.
+    gutter: f32,
     /// Per column: every sampled value is a number, so it is right-aligned.
     numeric: Vec<bool>,
     sortable: bool,
@@ -99,14 +113,34 @@ impl ResultsTable {
         self.press_pending = true;
     }
 
-    /// The kit selected a cell. After a press that is the click itself; otherwise the keyboard
-    /// moved, and the selection follows to that single cell.
-    pub fn cell_selected(&mut self, cell: (usize, usize)) {
+    /// A mouse press on a row number: marks the whole row (Shift extends, Ctrl/Cmd adds).
+    pub fn press_row(&mut self, row: usize, mods: Mods) {
+        self.selection.select_row(row, self.columns.len(), mods);
+        self.press_pending = true;
+    }
+
+    /// A press on the corner above the row numbers: marks everything.
+    pub fn select_all(&mut self) {
+        self.selection
+            .select_all(self.row_total(), self.columns.len());
+    }
+
+    /// The kit selected a cell (by its own column index, gutter included); returns the data
+    /// cell. After a press that is the click itself; otherwise the keyboard moved, and the
+    /// selection follows to that single cell, or to the whole row when it landed in the gutter.
+    pub fn cell_selected(&mut self, (row, kit_col): (usize, usize)) -> (usize, usize) {
+        let cell = (row, kit_col.saturating_sub(GUTTER));
         if std::mem::take(&mut self.press_pending) {
-            return;
+            return cell;
         }
-        self.selection.press(cell, Mods::default());
-        self.selection.release();
+        if kit_col < GUTTER {
+            self.selection
+                .select_row(row, self.columns.len(), Mods::default());
+        } else {
+            self.selection.press(cell, Mods::default());
+            self.selection.release();
+        }
+        cell
     }
 
     /// The marked cells as tab-separated text and how many there are; `None` when none are.
@@ -178,6 +212,7 @@ impl ResultsTable {
                 self.numeric = (0..s.columns.len())
                     .map(|i| is_numeric(&s.rows, i))
                     .collect();
+                self.gutter = gutter_width(s.rows.len());
                 self.columns = s
                     .columns
                     .iter()
@@ -229,7 +264,11 @@ impl ResultsTable {
 
 impl TableDelegate for ResultsTable {
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len()
+        if self.columns.is_empty() {
+            0
+        } else {
+            self.columns.len() + GUTTER
+        }
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -237,7 +276,34 @@ impl TableDelegate for ResultsTable {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        self.columns[col_ix].clone()
+        match col_ix.checked_sub(GUTTER) {
+            Some(i) => self.columns[i].clone(),
+            None => Column::new("row-numbers", "")
+                .width(px(self.gutter))
+                .fixed_left()
+                .resizable(false)
+                .movable(false)
+                .selectable(false),
+        }
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // The corner above the row numbers marks everything.
+        match col_ix.checked_sub(GUTTER) {
+            Some(i) => div().w_full().child(self.columns[i].name.clone()),
+            None => div().w_full().h_full().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|state, _: &MouseDownEvent, _, cx| {
+                    state.delegate_mut().select_all();
+                    cx.notify();
+                }),
+            ),
+        }
     }
 
     fn perform_sort(
@@ -247,6 +313,7 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        let col_ix = col_ix.saturating_sub(GUTTER);
         self.pending_sort = Some(match sort {
             ColumnSort::Default => None,
             ColumnSort::Ascending => Some((col_ix, false)),
@@ -262,6 +329,49 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        match col_ix.checked_sub(GUTTER) {
+            Some(col) => self.data_cell(row_ix, col, cx),
+            None => self.gutter_cell(row_ix, cx),
+        }
+    }
+}
+
+impl ResultsTable {
+    /// The row number; it marks the row (Shift extends, Ctrl/Cmd adds) and lights up while
+    /// any cell of the row is marked.
+    fn gutter_cell(&self, row_ix: usize, cx: &mut Context<TableState<Self>>) -> Div {
+        let theme = cx.theme();
+        let marked = self.selection.row_marked(row_ix);
+        div()
+            .absolute()
+            .inset_0()
+            .px_2()
+            .py_1()
+            .text_right()
+            .text_color(if marked {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .bg(theme.tokens.table_head)
+            .child((row_ix + 1).to_string())
+            .when(marked, |d| {
+                d.child(div().absolute().inset_0().bg(theme.primary.opacity(0.3)))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |state, ev: &MouseDownEvent, _, cx| {
+                    let mods = Mods {
+                        extend: ev.modifiers.shift,
+                        add: ev.modifiers.secondary(cx),
+                    };
+                    state.delegate_mut().press_row(row_ix, mods);
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn data_cell(&self, row_ix: usize, col_ix: usize, cx: &mut Context<TableState<Self>>) -> Div {
         let theme = cx.theme();
         let (inserted, deleted, edited) =
             self.session.as_ref().map_or((false, false, false), |s| {
@@ -272,7 +382,7 @@ impl TableDelegate for ResultsTable {
                 )
             });
         let right = self.numeric.get(col_ix).copied().unwrap_or(false);
-        let selected = self.selection.contains(row_ix, col_ix);
+        let marking = self.selection.marking(row_ix, col_ix);
         let base = match self.shown(row_ix, col_ix) {
             Shown::Default => div().italic().opacity(0.5).child("default"),
             Shown::Null => div().italic().opacity(0.5).child("NULL"),
@@ -281,8 +391,15 @@ impl TableDelegate for ResultsTable {
                 .child(pgroove_core::export::preview(v, MAX_CELL_CHARS)),
         };
         let base = if right { base.text_right() } else { base };
-        let base = base
-            .w_full()
+        let base = if deleted { base.line_through() } else { base };
+        // The wrapper covers the whole cell (padding included) so fills and the selection
+        // outline are seamless and presses or drags register anywhere in the cell.
+        let cell = div()
+            .absolute()
+            .inset_0()
+            .px_2()
+            .py_1()
+            .child(base.w_full())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |state, ev: &MouseDownEvent, _, cx| {
@@ -306,18 +423,34 @@ impl TableDelegate for ResultsTable {
                     state.delegate_mut().selection.release();
                 }),
             );
-        if deleted {
-            base.line_through().bg(theme.danger.opacity(0.18))
+        let cell = if deleted {
+            cell.bg(theme.danger.opacity(0.18))
         } else if inserted {
-            base.bg(theme.success.opacity(0.18))
+            cell.bg(theme.success.opacity(0.18))
         } else if edited {
-            base.bg(theme.warning.opacity(0.22))
-        } else if selected {
-            base.bg(theme.primary.opacity(0.28))
+            cell.bg(theme.warning.opacity(0.22))
         } else {
-            base
-        }
+            cell
+        };
+        // Drawn over the edit colors so a selected edited cell shows both.
+        cell.children(marking.map(|m| selection_layer(m, theme.primary)))
     }
+}
+
+/// The selection paint for one cell: a tint and an outline along the selected area's
+/// border. The active cell gets a heavier frame and no tint.
+fn selection_layer(m: Marking, color: Hsla) -> Div {
+    let layer = div().absolute().inset_0().border_color(color);
+    if !m.tint {
+        return layer.border_2();
+    }
+    let e = m.edges;
+    layer
+        .bg(color.opacity(0.16))
+        .when(e.top, |d| d.border_t_1())
+        .when(e.right, |d| d.border_r_1())
+        .when(e.bottom, |d| d.border_b_1())
+        .when(e.left, |d| d.border_l_1())
 }
 
 #[cfg(test)]
@@ -411,6 +544,13 @@ mod tests {
     }
 
     #[test]
+    fn gutter_fits_the_row_count() {
+        assert_eq!(super::gutter_width(0), 44.0);
+        assert_eq!(super::gutter_width(999), 48.0);
+        assert_eq!(super::gutter_width(1_000_000), 80.0);
+    }
+
+    #[test]
     fn marking_and_copying_cells() {
         use crate::selection::Mods;
         let mut t = ResultsTable::default();
@@ -429,10 +569,20 @@ mod tests {
         t.selection_mut().release();
         assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\t\n".into(), 4)));
         // The click's own SelectCell keeps the marked block; a keyboard move collapses it.
-        t.cell_selected((1, 1));
+        // The kit's column index counts the row-number gutter.
+        assert_eq!(t.cell_selected((1, 2)), (1, 1));
         assert_eq!(t.selection().cell_count(), 4);
-        t.cell_selected((0, 1));
+        assert_eq!(t.cell_selected((0, 2)), (0, 1));
         assert_eq!(t.selection().cell_count(), 1);
+        // Landing in the gutter by keyboard marks the row; a press on a row number does too.
+        assert_eq!(t.cell_selected((1, 0)), (1, 0));
+        assert_eq!(t.selection().cell_count(), 2);
+        t.press_row(0, Mods::default());
+        assert_eq!(t.cell_selected((0, 0)), (0, 0));
+        assert_eq!(t.selection().rows().into_iter().collect::<Vec<_>>(), [0]);
+        assert!(t.selection().row_marked(0) && !t.selection().row_marked(1));
+        t.select_all();
+        assert_eq!(t.selection().cell_count(), 4);
         // New data clears the marks.
         t.set(None);
         assert_eq!(t.selection().cell_count(), 0);

@@ -13,6 +13,7 @@ use pgroove_core::query::ResultSet;
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::GridPane;
+use crate::results::GUTTER;
 
 const REFRESH: Duration = Duration::from_secs(5);
 
@@ -167,7 +168,7 @@ impl ActivityView {
             .find(|&r| monitor::row_pid(self.view, &self.data, r) == Some(pid));
         if let Some(row) = row {
             let grid = self.pane.read(cx).grid().clone();
-            grid.update(cx, |g, cx| g.set_selected_cell(row, 0, cx));
+            grid.update(cx, |g, cx| g.set_selected_cell(row, GUTTER, cx));
         }
     }
 

@@ -12,6 +12,17 @@ const BUILTIN: &str = include_str!("../themes/catppuccin.json");
 /// Corner radius of the application window.
 const WINDOW_RADIUS: f32 = 10.;
 
+/// Re-applies the settings that must survive a theme change: the window radius, and no kit
+/// highlight on the table's clicked cell (the result grid draws its own selection, and the
+/// kit's can go stale after a drag).
+fn tweak(cx: &mut App) {
+    Theme::update(cx, |t| {
+        t.window_radius = px(WINDOW_RADIUS);
+        t.table_active = transparent_black();
+        t.table_active_border = transparent_black();
+    });
+}
+
 /// The theme choice in force, kept so system appearance changes can be followed.
 #[derive(Clone)]
 struct Choice {
@@ -102,7 +113,7 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     });
     let mode = mode_for(settings.appearance, window.as_deref(), cx);
     Theme::change(mode, window, cx);
-    Theme::update(cx, |t| t.window_radius = px(WINDOW_RADIUS));
+    tweak(cx);
     cx.refresh_windows();
 }
 
@@ -116,7 +127,7 @@ pub fn system_changed(window: &mut Window, cx: &mut App) {
     }
     let mode = mode_for(Appearance::System, Some(window), cx);
     Theme::change(mode, Some(window), cx);
-    Theme::update(cx, |t| t.window_radius = px(WINDOW_RADIUS));
+    tweak(cx);
 }
 
 #[cfg(test)]

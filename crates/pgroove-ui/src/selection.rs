@@ -32,6 +32,23 @@ impl Rect {
     }
 }
 
+/// Which sides of a cell lie on the outline of the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edges {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+/// How a cell is drawn: the sides to outline and whether to tint it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Marking {
+    pub edges: Edges,
+    /// The active cell (where the selection started) stays untinted so it stands out.
+    pub tint: bool,
+}
+
 /// How a press or click combines with the existing selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mods {
@@ -56,6 +73,44 @@ impl CellSelection {
 
     pub fn contains(&self, row: usize, col: usize) -> bool {
         self.ranges.iter().any(|r| r.contains(row, col))
+    }
+
+    /// Whether any selected block covers the row.
+    pub fn row_marked(&self, row: usize) -> bool {
+        self.ranges.iter().any(|r| (r.r0..=r.r1).contains(&row))
+    }
+
+    /// How to draw a cell, or `None` when it is not selected. The outline follows the
+    /// outer border of the selected area, so touching or overlapping blocks read as one.
+    pub fn marking(&self, row: usize, col: usize) -> Option<Marking> {
+        if !self.contains(row, col) {
+            return None;
+        }
+        if self.anchor == Some((row, col)) {
+            let all = Edges {
+                top: true,
+                right: true,
+                bottom: true,
+                left: true,
+            };
+            return Some(Marking {
+                edges: all,
+                tint: false,
+            });
+        }
+        let open = |r: Option<usize>, c: Option<usize>| match (r, c) {
+            (Some(r), Some(c)) => !self.contains(r, c),
+            _ => true,
+        };
+        Some(Marking {
+            edges: Edges {
+                top: open(row.checked_sub(1), Some(col)),
+                right: open(Some(row), col.checked_add(1)),
+                bottom: open(row.checked_add(1), Some(col)),
+                left: open(Some(row), col.checked_sub(1)),
+            },
+            tint: true,
+        })
     }
 
     /// A mouse press on a cell: starts a block (and a drag).
@@ -265,6 +320,49 @@ mod tests {
             s.cell_count(),
             1,
             "shift without an anchor selects the cell"
+        );
+    }
+
+    #[test]
+    fn marking_outlines_the_selected_area() {
+        let mut s = CellSelection::default();
+        assert_eq!(s.marking(0, 0), None);
+        s.press((1, 1), PLAIN);
+        s.drag_to((2, 2));
+        s.release();
+        let m = |r, c| s.marking(r, c).expect("selected");
+        // The anchor is outlined on every side and left untinted.
+        let anchor = m(1, 1);
+        assert!(!anchor.tint);
+        assert!(anchor.edges.top && anchor.edges.right && anchor.edges.bottom && anchor.edges.left);
+        // The opposite corner is outlined only on the outside.
+        let corner = m(2, 2);
+        assert!(corner.tint);
+        assert_eq!(
+            corner.edges,
+            Edges {
+                top: false,
+                right: true,
+                bottom: true,
+                left: false
+            }
+        );
+        assert_eq!(s.marking(3, 3), None);
+        // Touching blocks share no inner outline.
+        let mut s = CellSelection::default();
+        s.press((0, 0), PLAIN);
+        s.release();
+        s.press((0, 1), CTRL);
+        s.release();
+        let left = s.marking(0, 0).expect("selected").edges;
+        assert_eq!(
+            left,
+            Edges {
+                top: true,
+                right: false,
+                bottom: true,
+                left: true
+            }
         );
     }
 

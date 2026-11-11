@@ -15,7 +15,6 @@ use pgroove_core::query;
 use pgroove_core::query::ResultSet;
 
 use crate::results::ResultsTable;
-use crate::selection::Mods;
 
 actions!(
     result_grid,
@@ -78,34 +77,29 @@ impl GridPane {
         } else {
             ResultsTable::default()
         };
-        let grid = cx.new(|cx| TableState::new(delegate, window, cx).cell_selectable(true));
+        // The result grid draws its own row-number gutter and marks rows itself, so the
+        // kit's blank row header and its row selection are off.
+        let grid = cx.new(|cx| {
+            TableState::new(delegate, window, cx)
+                .cell_selectable(true)
+                .row_header(false)
+                .row_selectable(false)
+        });
         let edit_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Value"));
         let subs = vec![
             cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
-                // A row header click marks the whole row (Shift extends, Ctrl/Cmd adds).
-                if let TableEvent::SelectRow(r) = ev {
-                    let m = window.modifiers();
-                    let mods = Mods {
-                        extend: m.shift,
-                        add: m.secondary(cx),
-                    };
-                    this.grid.update(cx, |g, cx| {
-                        let cols = g.delegate().names().len();
-                        g.delegate_mut().selection_mut().select_row(*r, cols, mods);
-                        cx.notify();
-                    });
-                }
                 if let TableEvent::SelectCell(r, c) = ev {
-                    this.grid
+                    let (r, c) = this
+                        .grid
                         .update(cx, |g, _| g.delegate_mut().cell_selected((*r, *c)));
-                    this.selected = Some((*r, *c));
+                    this.selected = Some((r, c));
                     this.refresh_inspected(cx);
                     if this.editable && this.inspected.as_ref().is_some_and(|i| i.can_edit) {
                         let text = this
                             .grid
                             .read(cx)
                             .delegate()
-                            .cell(*r, *c)
+                            .cell(r, c)
                             .unwrap_or_default()
                             .to_string();
                         this.edit_input
