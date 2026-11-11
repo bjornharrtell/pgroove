@@ -79,6 +79,8 @@ pub enum Row {
         schema: String,
         name: String,
         kind: ObjectKind,
+        /// Estimated size in bytes, for relations the catalog knows the size of.
+        size: Option<i64>,
     },
     Message(String),
     ExtensionsHeader {
@@ -227,6 +229,7 @@ impl SchemaTree {
                             schema: schema.clone(),
                             name: o.name.clone(),
                             kind: o.kind,
+                            size: o.size,
                         });
                     }
                 }
@@ -327,6 +330,7 @@ impl SchemaTree {
                                 schema: name.clone(),
                                 name: o.name.clone(),
                                 kind: o.kind,
+                                size: o.size,
                             }));
                         }
                     }
@@ -365,6 +369,7 @@ mod tests {
         SchemaObject {
             name: name.into(),
             kind: ObjectKind::Table,
+            size: None,
         }
     }
 
@@ -420,6 +425,7 @@ mod tests {
         let o = |name: &str, kind| SchemaObject {
             name: name.into(),
             kind,
+            size: None,
         };
         t.set_objects(
             "s",
@@ -482,6 +488,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn relation_sizes_reach_the_rows() {
+        let sized = |name: &str, kind, size| SchemaObject {
+            name: name.into(),
+            kind,
+            size,
+        };
+        let objects = || {
+            vec![
+                sized("big", ObjectKind::Table, Some(1 << 20)),
+                sized("f(a integer)", ObjectKind::Function, None),
+            ]
+        };
+        let sizes = |rows: Vec<Row>| -> Vec<(String, Option<i64>)> {
+            rows.into_iter()
+                .filter_map(|r| match r {
+                    Row::Object { name, size, .. } => Some((name, size)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut t = SchemaTree::default();
+        t.set_schemas(Ok(vec!["s".into()]));
+        t.toggle("s");
+        t.set_objects("s", Ok(objects()));
+        assert_eq!(
+            sizes(t.rows()),
+            [("big".to_string(), Some(1 << 20))],
+            "the size came through the tree"
+        );
+        // Search results carry it too, so a filtered tree shows the same sizes.
+        t.set_filter("b");
+        assert!(t.needs_all_objects());
+        t.set_all_objects(Ok(objects()
+            .into_iter()
+            .map(|o| ("s".to_string(), o))
+            .collect()));
+        assert_eq!(sizes(t.rows()), [("big".to_string(), Some(1 << 20))]);
+    }
+
     fn all_objects() -> Vec<(String, SchemaObject)> {
         let o = |s: &str, n: &str, kind| {
             (
@@ -489,6 +535,7 @@ mod tests {
                 SchemaObject {
                     name: n.into(),
                     kind,
+                    size: None,
                 },
             )
         };
@@ -570,6 +617,7 @@ mod tests {
                     SchemaObject {
                         name: format!("t{i:04}"),
                         kind: ObjectKind::Table,
+                        size: None,
                     },
                 )
             })

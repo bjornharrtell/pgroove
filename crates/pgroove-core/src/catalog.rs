@@ -74,6 +74,34 @@ impl ObjectKind {
 pub struct SchemaObject {
     pub name: String,
     pub kind: ObjectKind,
+    /// Estimated size in bytes, from the catalog's page count; `None` when the
+    /// catalog has no estimate (views, empty relations) or for non-relations.
+    /// This is cheap to fetch: it costs no filesystem access, unlike
+    /// `pg_relation_size`.
+    pub size: Option<i64>,
+}
+
+/// A byte count as humans read it: whole bytes below 1 kB, then one decimal below
+/// ten units and none above, e.g. `512 bytes`, `1.5 kB`, `42 MB`.
+pub fn format_size(bytes: i64) -> String {
+    let mut out = format!("{bytes} bytes");
+    for (scale, unit) in [
+        (1i64 << 40, "TB"),
+        (1 << 30, "GB"),
+        (1 << 20, "MB"),
+        (1 << 10, "kB"),
+    ] {
+        if bytes >= scale {
+            let value = bytes as f64 / scale as f64;
+            out = if value < 10. {
+                format!("{value:.1} {unit}")
+            } else {
+                format!("{value:.0} {unit}")
+            };
+            break;
+        }
+    }
+    out
 }
 
 /// Databases that accept connections (templates excluded), sorted by name.
@@ -101,18 +129,21 @@ pub async fn schemas(client: &Client) -> Result<Vec<String>> {
     Ok(rows.iter().map(|r| r.get(0)).collect())
 }
 
-/// SQL listing objects as `(schema, name, kind)`; `schema_cond` restricts the schemas
-/// and may use `n.nspname` and the parameter `$1`.
+/// SQL listing objects as `(schema, name, kind, size)`; `schema_cond` restricts the
+/// schemas and may use `n.nspname` and the parameter `$1`. The size is the page
+/// count times the block size, an estimate the catalog already holds, so it costs
+/// no filesystem access per relation.
 fn objects_sql(schema_cond: &str) -> String {
     format!(
-        "select nsp, name, kind from ( \
-           select n.nspname::text as nsp, c.relname::text as name, c.relkind::text as kind, 0 as grp \
+        "select nsp, name, kind, size from ( \
+           select n.nspname::text as nsp, c.relname::text as name, c.relkind::text as kind, 0 as grp, \
+                  c.relpages::int8 * current_setting('block_size')::int8 as size \
            from pg_class c join pg_namespace n on n.oid = c.relnamespace \
            where {schema_cond} and c.relkind in ('r','p','f','v','m','S') \
              and not c.relispartition \
            union all \
            select n.nspname::text, t.typname::text, \
-                  case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1 \
+                  case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1, null::int8 \
            from pg_type t join pg_namespace n on n.oid = t.typnamespace \
            where {schema_cond} \
              and (t.typtype in ('e','d') or (t.typtype = 'c' and exists \
@@ -120,7 +151,7 @@ fn objects_sql(schema_cond: &str) -> String {
            union all \
            select n.nspname::text, \
                   p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')', \
-                  case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2 \
+                  case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2, null::int8 \
            from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
            where {schema_cond} and p.prokind in ('f','p','a') \
              and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e') \
@@ -137,6 +168,8 @@ fn to_objects(rows: &[tokio_postgres::Row]) -> Vec<(String, SchemaObject)> {
                 SchemaObject {
                     name: r.get(1),
                     kind,
+                    // A page count of zero means "no estimate yet", not "no bytes".
+                    size: r.get::<_, Option<i64>>(3).filter(|b| *b > 0),
                 },
             ))
         })
@@ -253,6 +286,19 @@ mod tests {
         assert!(!ObjectKind::Function.is_relation());
     }
 
+    #[test]
+    fn sizes_read_at_a_glance() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(1023), "1023 bytes");
+        assert_eq!(format_size(1024), "1.0 kB");
+        assert_eq!(format_size(1536), "1.5 kB");
+        assert_eq!(format_size(10 * 1024), "10 kB");
+        assert_eq!(format_size(8192 * 512), "4.0 MB");
+        assert_eq!(format_size(42 * (1 << 20)), "42 MB");
+        assert_eq!(format_size(3 << 30), "3.0 GB");
+        assert_eq!(format_size(2 << 40), "2.0 TB");
+    }
+
     #[tokio::test]
     async fn schema_objects_live() {
         let Some((client, _)) = crate::connect::test_connection().await else {
@@ -268,7 +314,10 @@ mod tests {
                  create function pgroove_k.add(a int, b int) returns int \
                    language sql as 'select a + b'; \
                  create procedure pgroove_k.noop() language sql as ''; \
-                 create aggregate pgroove_k.mysum(int) (sfunc = int4pl, stype = int, initcond = '0')",
+                 create aggregate pgroove_k.mysum(int) (sfunc = int4pl, stype = int, initcond = '0'); \
+                 create view pgroove_k.v as select id from pgroove_k.t; \
+                 insert into pgroove_k.t select generate_series(1, 1000); \
+                 analyze pgroove_k.t",
             )
             .await
             .unwrap();
@@ -278,6 +327,7 @@ mod tests {
             got,
             [
                 ("t", ObjectKind::Table),
+                ("v", ObjectKind::View),
                 ("mood", ObjectKind::EnumType),
                 ("pair", ObjectKind::CompositeType),
                 ("posint", ObjectKind::DomainType),
@@ -286,6 +336,12 @@ mod tests {
                 ("noop()", ObjectKind::Procedure),
             ]
         );
+        // Only relations carry a size, and a table with pages has a catalog estimate.
+        let size = |name: &str| objs.iter().find(|o| o.name == name).unwrap().size;
+        assert!(size("t").is_some_and(|b| b >= 8192), "got {:?}", size("t"));
+        assert_eq!(size("v"), None, "a view has no pages of its own");
+        assert_eq!(size("mood"), None, "a type has no size");
+        assert_eq!(size("mysum(integer)"), None);
         let f = definition(
             &client,
             "pgroove_k",

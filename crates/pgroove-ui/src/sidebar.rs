@@ -10,7 +10,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::ConnectionProfile;
-use pgroove_core::catalog::ObjectKind;
+use pgroove_core::catalog::{self, ObjectKind};
 use pgroove_core::data::TableRef;
 
 use crate::schema_tree::Row;
@@ -47,6 +47,19 @@ const CHEVRON_WIDTH: f32 = 22.;
 /// Left padding for a leaf row under a node at `parent_depth`.
 fn leaf_indent(parent_depth: usize) -> f32 {
     TREE_BASE + parent_depth as f32 * INDENT_STEP + CHEVRON_WIDTH
+}
+
+/// The size shown at the right edge of a relation row; empty without an estimate.
+fn size_text(size: Option<i64>) -> String {
+    size.map(catalog::format_size).unwrap_or_default()
+}
+
+/// Tooltip of an object row: its kind, plus the size when the catalog has one.
+fn row_tip(kind: ObjectKind, size: Option<i64>) -> String {
+    match size.map(catalog::format_size) {
+        Some(text) => format!("{} · about {text}", kind.label()),
+        None => kind.label().to_string(),
+    }
 }
 
 #[derive(Clone)]
@@ -172,7 +185,12 @@ impl Workspace {
                     cx.notify();
                 }))
                 .into_any_element(),
-            Row::Object { schema, name, kind } => {
+            Row::Object {
+                schema,
+                name,
+                kind,
+                size,
+            } => {
                 let icon = match kind {
                     ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
                     ObjectKind::Sequence => IconName::Hash,
@@ -193,8 +211,10 @@ impl Workspace {
                 let row = self
                     .tree_row_px(("object", i), leaf_indent(4), cx)
                     .child(Icon::new(icon).size_4().text_color(muted))
-                    .child(name.clone())
-                    .tooltip(move |window, cx| Tooltip::new(kind.label()).build(window, cx));
+                    // The name yields space so the trailing size sits at the right edge.
+                    .child(div().flex_1().truncate().child(name.clone()))
+                    .child(div().text_xs().text_color(muted).child(size_text(size)))
+                    .tooltip(move |window, cx| Tooltip::new(row_tip(kind, size)).build(window, cx));
                 let row = if kind.is_relation() {
                     let table = TableRef::new(schema.clone(), name.clone());
                     row.cursor_pointer()
@@ -587,7 +607,9 @@ impl Workspace {
                     }
                     cx.notify();
                 }
-                Row::Object { schema, name, kind } => {
+                Row::Object {
+                    schema, name, kind, ..
+                } => {
                     if kind.is_relation() {
                         let table = TableRef::new(schema.clone(), name.clone());
                         self.open_table(*sid, table, window, cx);
@@ -870,7 +892,21 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{leaf_indent, step_cursor};
+    use super::{leaf_indent, row_tip, size_text, step_cursor};
+
+    #[test]
+    fn object_rows_show_the_catalog_size() {
+        assert_eq!(size_text(Some(1536)), "1.5 kB");
+        assert_eq!(size_text(None), "", "no estimate, nothing to show");
+        assert_eq!(
+            row_tip(pgroove_core::catalog::ObjectKind::Table, Some(1536)),
+            "table · about 1.5 kB"
+        );
+        assert_eq!(
+            row_tip(pgroove_core::catalog::ObjectKind::View, None),
+            "view"
+        );
+    }
 
     #[test]
     fn cursor_steps_stay_in_range() {
