@@ -1,3 +1,7 @@
+// Release builds are a GUI application on Windows, so no console window opens; debug
+// builds keep the console, where the logger writes.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::sync::Arc;
 
 use gpui_kit::component::TitleBar;
