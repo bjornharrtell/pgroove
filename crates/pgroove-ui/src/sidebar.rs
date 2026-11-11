@@ -247,13 +247,11 @@ impl Workspace {
                     let table = TableRef::new(s.clone(), n.clone());
                     let mut menu = menu;
                     if kind.is_relation() {
-                        let (t1, t2, t3, tb1, tb2, q) = (
-                            ctx_this.clone(),
+                        let (t1, t2, tb1, tb2) = (
                             ctx_this.clone(),
                             ctx_this.clone(),
                             table.clone(),
                             table.clone(),
-                            qualified.clone(),
                         );
                         menu = menu
                             .item(
@@ -268,12 +266,6 @@ impl Workspace {
                                     t2.update(cx, |ws, cx| {
                                         ws.open_structure(sid, tb2.clone(), window, cx)
                                     })
-                                },
-                            ))
-                            .item(PopupMenuItem::new("Select first 100 rows").on_click(
-                                move |_, window, cx| {
-                                    let sql = format!("select * from {q} limit 100;");
-                                    t3.update(cx, |ws, cx| ws.append_to_editor(&sql, window, cx))
                                 },
                             ));
                         let submenu = PopupMenu::build(window, cx, {

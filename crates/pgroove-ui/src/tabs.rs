@@ -79,6 +79,38 @@ impl Workspace {
         tab
     }
 
+    /// The query tab to put generated text for database `sid` in: the active tab when it is
+    /// bound to that database, else another tab bound to it, else a new tab bound to it.
+    pub(crate) fn query_tab_for(
+        &mut self,
+        sid: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<QueryTab> {
+        let found = {
+            let bound = |t: &TabKind| match t {
+                TabKind::Query(q, _) => q.read(cx).session() == Some(sid),
+                _ => false,
+            };
+            let active = self.tabs.get(self.active_tab).filter(|t| bound(t));
+            let ix = match active {
+                Some(_) => Some(self.active_tab),
+                None => self.tabs.iter().position(bound),
+            };
+            ix.and_then(|ix| match &self.tabs[ix] {
+                TabKind::Query(q, _) => Some((ix, q.clone())),
+                _ => None,
+            })
+        };
+        if let Some((ix, tab)) = found {
+            self.active_tab = ix;
+            return tab;
+        }
+        let tab = self.new_query(window, cx);
+        self.bind_query(&tab, Some(sid), cx);
+        tab
+    }
+
     pub(crate) fn append_to_editor(
         &mut self,
         text: &str,
@@ -103,8 +135,8 @@ impl Workspace {
         }
     }
 
-    /// Generates `statement` for `table` from its structure and shows it in the editor,
-    /// as the object tree's "Generate SQL" submenu asks for.
+    /// Generates `statement` for `table` from its structure and shows it in a query tab of
+    /// the database it came from, as the object tree's "Generate SQL" submenu asks for.
     pub(crate) fn generate_sql(
         &mut self,
         sid: usize,
@@ -124,7 +156,11 @@ impl Workspace {
             let result = flatten(task.await);
             this.update_in(cx, |this, window, cx| match result {
                 Ok(st) => match pgroove_core::sqlgen::generate(&table, &st, statement) {
-                    Some(sql) => this.append_to_editor(&sql, window, cx),
+                    Some(sql) => {
+                        let tab = this.query_tab_for(sid, window, cx);
+                        tab.update(cx, |t, cx| t.append(&sql, window, cx));
+                        cx.notify();
+                    }
                     None => window.push_notification(
                         Notification::info(format!(
                             "{} is not available for {}",
