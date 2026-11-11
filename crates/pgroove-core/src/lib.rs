@@ -19,6 +19,7 @@ pub mod query;
 pub mod secrets;
 pub mod session;
 pub mod settings;
+pub mod sqlgen;
 pub mod sqlsplit;
 pub mod store;
 pub mod structure;

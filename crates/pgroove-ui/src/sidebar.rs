@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,6 +12,7 @@ use gpui_kit::*;
 use pgroove_core::ConnectionProfile;
 use pgroove_core::catalog::{self, ObjectKind};
 use pgroove_core::data::TableRef;
+use pgroove_core::sqlgen;
 
 use crate::schema_tree::Row;
 use crate::sessions::{DbSession, SessionStatus};
@@ -232,7 +233,12 @@ impl Workspace {
                     row
                 };
                 let (s, n) = (schema.clone(), name.clone());
-                row.context_menu(move |menu, _, _| {
+                // MERGE arrived in PostgreSQL 15, so older servers do not offer it.
+                let merge = self.session(sid).is_some_and(|s| match &s.status {
+                    SessionStatus::Ready { version } => sqlgen::supports_merge(version),
+                    _ => false,
+                });
+                row.context_menu(move |menu, window, cx| {
                     let qualified = format!(
                         "{}.{}",
                         pgroove_core::data::quote_ident(&s),
@@ -270,6 +276,35 @@ impl Workspace {
                                     t3.update(cx, |ws, cx| ws.append_to_editor(&sql, window, cx))
                                 },
                             ));
+                        let submenu = PopupMenu::build(window, cx, {
+                            let this = ctx_this.clone();
+                            let table = table.clone();
+                            move |menu, _, _| {
+                                let mut menu = menu;
+                                for statement in sqlgen::Statement::ALL {
+                                    if statement == sqlgen::Statement::Merge && !merge {
+                                        continue;
+                                    }
+                                    let (this, table) = (this.clone(), table.clone());
+                                    menu =
+                                        menu.item(PopupMenuItem::new(statement.label()).on_click(
+                                            move |_, window, cx| {
+                                                this.update(cx, |ws, cx| {
+                                                    ws.generate_sql(
+                                                        sid,
+                                                        table.clone(),
+                                                        statement,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                })
+                                            },
+                                        ));
+                                }
+                                menu
+                            }
+                        });
+                        menu = menu.item(PopupMenuItem::submenu("Generate SQL", submenu));
                     }
                     if has_definition {
                         let (t, s2, n2) = (ctx_this.clone(), s.clone(), n.clone());

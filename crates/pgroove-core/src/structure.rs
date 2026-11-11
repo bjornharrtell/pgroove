@@ -26,6 +26,10 @@ pub struct ConstraintInfo {
     pub definition: String,
     /// Referenced table for foreign keys.
     pub references: Option<TableRef>,
+    /// Columns the constraint covers, in constraint order, for the constraint kinds
+    /// that name a key; a check lists the columns it looks at, an exclusion constraint
+    /// records none.
+    pub columns: Vec<String>,
 }
 
 impl ConstraintInfo {
@@ -192,7 +196,11 @@ pub async fn load(client: &Client, table: &TableRef) -> Result<Structure> {
     let constraints = client
         .query(
             "select con.conname::text, con.contype::text, pg_get_constraintdef(con.oid), \
-                    rn.nspname::text, rc.relname::text \
+                    rn.nspname::text, rc.relname::text, \
+                    coalesce((select array_agg(a.attname::text order by k.ord)
+                              from unnest(con.conkey) with ordinality as k(attnum, ord)
+                              join pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.attnum),
+                             '{}') \
              from pg_constraint con \
              left join pg_class rc on rc.oid = con.confrelid \
              left join pg_namespace rn on rn.oid = rc.relnamespace \
@@ -210,6 +218,7 @@ pub async fn load(client: &Client, table: &TableRef) -> Result<Structure> {
                 (Some(s), Some(n)) => Some(TableRef::new(s, n)),
                 _ => None,
             },
+            columns: r.get(5),
         })
         .collect();
 
@@ -331,6 +340,7 @@ mod tests {
                 kind: k,
                 definition: String::new(),
                 references: None,
+                columns: vec![],
             };
             assert_eq!(c.kind_label(), l);
         }
@@ -356,6 +366,7 @@ mod tests {
             kind: 'p',
             definition: "PRIMARY KEY (id)".into(),
             references: None,
+            columns: vec!["id".into()],
         }];
         st.indexes = vec![
             IndexInfo {
@@ -429,8 +440,12 @@ mod tests {
         assert_eq!(st.columns[2].comment.as_deref(), Some("note"));
         let fk = st.constraints.iter().find(|c| c.kind == 'f').unwrap();
         assert_eq!(fk.references, Some(TableRef::new("pgroove_s", "p")));
-        assert!(st.constraints.iter().any(|c| c.kind == 'p'));
+        assert_eq!(fk.columns, ["pid"], "the foreign key names its column");
+        let pk = st.constraints.iter().find(|c| c.kind == 'p').unwrap();
+        assert_eq!(pk.columns, ["id"], "so does the primary key");
         assert!(st.constraints.iter().any(|c| c.kind == 'c'));
+        let check = st.constraints.iter().find(|c| c.kind == 'c').unwrap();
+        assert_eq!(check.columns, ["id"], "a check lists what it looks at");
         assert!(st.indexes.iter().any(|i| i.name == "c_n_idx" && !i.unique));
         assert!(st.stats.total_bytes > 0);
         let d = ddl(&t, &st);

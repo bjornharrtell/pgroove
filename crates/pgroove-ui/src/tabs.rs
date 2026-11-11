@@ -103,6 +103,44 @@ impl Workspace {
         }
     }
 
+    /// Generates `statement` for `table` from its structure and shows it in the editor,
+    /// as the object tree's "Generate SQL" submenu asks for.
+    pub(crate) fn generate_sql(
+        &mut self,
+        sid: usize,
+        table: TableRef,
+        statement: pgroove_core::sqlgen::Statement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client_of(sid) else {
+            return;
+        };
+        let load_table = table.clone();
+        let task = self
+            .runtime
+            .spawn(async move { pgroove_core::structure::load(&client, &load_table).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = flatten(task.await);
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(st) => match pgroove_core::sqlgen::generate(&table, &st, statement) {
+                    Some(sql) => this.append_to_editor(&sql, window, cx),
+                    None => window.push_notification(
+                        Notification::info(format!(
+                            "{} is not available for {}",
+                            statement.label(),
+                            table.qualified()
+                        )),
+                        cx,
+                    ),
+                },
+                Err(e) => window.push_notification(Notification::error(e), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn show_definition(
         &mut self,
         sid: usize,
