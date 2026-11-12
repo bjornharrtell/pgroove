@@ -111,17 +111,6 @@ impl Workspace {
         tab
     }
 
-    pub(crate) fn append_to_editor(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.query_tab(window, cx);
-        tab.update(cx, |t, cx| t.append(text, window, cx));
-        cx.notify();
-    }
-
     pub(crate) fn open_structure(
         &mut self,
         sid: usize,
@@ -195,7 +184,11 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = flatten(task.await);
             this.update_in(cx, |this, window, cx| match result {
-                Ok(text) => this.append_to_editor(&text, window, cx),
+                Ok(text) => {
+                    let tab = this.query_tab_for(sid, window, cx);
+                    tab.update(cx, |t, cx| t.append(&text, window, cx));
+                    cx.notify();
+                }
                 Err(e) => window.push_notification(Notification::error(e), cx),
             })
             .ok();
