@@ -78,12 +78,14 @@ impl GridPane {
             ResultsTable::default()
         };
         // The result grid draws its own row-number gutter and marks rows itself, so the
-        // kit's blank row header and its row selection are off.
+        // kit's blank row header and its row selection are off. Columns stay in query order:
+        // dragging a header reorders them and makes the widths look wrong.
         let grid = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .cell_selectable(true)
                 .row_header(false)
                 .row_selectable(false)
+                .col_movable(false)
         });
         let edit_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Value"));
         let subs = vec![
