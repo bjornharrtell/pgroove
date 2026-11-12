@@ -149,7 +149,15 @@ impl Workspace {
                     )
                     .context_menu(move |menu, _, _| {
                         let (t, copy) = (refresh_this.clone(), copy_name.clone());
-                        menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
+                        let open = refresh_this.clone();
+                        menu.item(PopupMenuItem::new("Open Tab Here").on_click(
+                            move |_, window, cx| {
+                                open.update(cx, |ws, cx| {
+                                    ws.open_tab_here(sid, window, cx);
+                                })
+                            },
+                        ))
+                        .item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
                             t.update(cx, |ws, cx| ws.refresh_session(sid, cx))
                         }))
                         .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {

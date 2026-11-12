@@ -79,6 +79,20 @@ impl Workspace {
         tab
     }
 
+    /// A new query tab bound to database `sid`, as the object tree's "Open Tab Here" asks for.
+    /// Always a new tab, unlike `query_tab_for`, which reuses one.
+    pub(crate) fn open_tab_here(
+        &mut self,
+        sid: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<QueryTab> {
+        let tab = self.new_query(window, cx);
+        self.bind_query(&tab, Some(sid), cx);
+        self.last_session = Some(sid);
+        tab
+    }
+
     /// The query tab to put generated text for database `sid` in: the active tab when it is
     /// bound to that database, else another tab bound to it, else a new tab bound to it.
     pub(crate) fn query_tab_for(
