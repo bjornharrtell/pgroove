@@ -23,6 +23,7 @@ pub enum PaletteCommand {
     CheckUpdates,
     InstallUpdate,
     ToggleUpdateChecks,
+    ToggleUppercaseSql,
     SetAppearance(Appearance),
     UseTheme(String),
     ReloadThemes,
@@ -59,6 +60,7 @@ pub struct PaletteContext {
     /// A newer version has been found and can be installed.
     pub update_available: bool,
     pub auto_check_updates: bool,
+    pub uppercase_generated_sql: bool,
     pub appearance: Appearance,
     pub light_theme: String,
     pub dark_theme: String,
@@ -196,6 +198,15 @@ pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup>
         },
         &["upgrade", "settings"],
     ));
+    app.push(entry(
+        ToggleUppercaseSql,
+        if ctx.uppercase_generated_sql {
+            "Write generated SQL keywords in lower case"
+        } else {
+            "Write generated SQL keywords in upper case"
+        },
+        &["settings", "keywords", "caps", "generate"],
+    ));
     groups.push(PaletteGroup {
         label: "Application",
         entries: app,
@@ -218,6 +229,7 @@ mod tests {
             read_only,
             update_available: update,
             auto_check_updates: auto,
+            uppercase_generated_sql: false,
             appearance: Appearance::System,
             light_theme: "Light One".into(),
             dark_theme: "Dark Two".into(),
@@ -239,7 +251,11 @@ mod tests {
         assert_eq!(g.len(), 5);
         assert_eq!(
             titles(&g, 4),
-            ["Check for updates", "Turn off automatic update checks"]
+            [
+                "Check for updates",
+                "Turn off automatic update checks",
+                "Write generated SQL keywords in upper case"
+            ]
         );
         assert!(!titles(&g, 0).contains(&"Run query"));
         assert_eq!(titles(&g, 1), ["Allow editing (turn off read-only)"]);
@@ -275,8 +291,16 @@ mod tests {
             [
                 "Check for updates",
                 "Install the available update",
-                "Turn on automatic update checks"
+                "Turn on automatic update checks",
+                "Write generated SQL keywords in upper case"
             ]
+        );
+        // Once on, the same entry offers to turn it off again.
+        let mut on = ctx(true, false, true, false);
+        on.uppercase_generated_sql = true;
+        assert_eq!(
+            titles(&groups(&[], &on), 4).last(),
+            Some(&"Write generated SQL keywords in lower case")
         );
     }
 

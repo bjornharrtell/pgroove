@@ -162,11 +162,13 @@ impl Workspace {
 
     pub(crate) fn toggle_update_checks(&mut self, cx: &mut Context<Self>) {
         self.settings.check_for_updates = !self.settings.check_for_updates;
-        if let Some(path) = &self.settings_path
-            && let Err(e) = self.settings.save(path)
-        {
-            log::warn!("could not save settings: {e:#}");
-        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_uppercase_sql(&mut self, cx: &mut Context<Self>) {
+        self.settings.uppercase_generated_sql = !self.settings.uppercase_generated_sql;
+        self.save_settings();
         cx.notify();
     }
 

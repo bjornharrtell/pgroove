@@ -160,6 +160,11 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(st) => match pgroove_core::sqlgen::generate(&table, &st, statement) {
                     Some(sql) => {
+                        let sql = if this.settings.uppercase_generated_sql {
+                            pgroove_core::sqlgen::uppercase_keywords(&sql)
+                        } else {
+                            sql
+                        };
                         let tab = this.query_tab_for(sid, window, cx);
                         tab.update(cx, |t, cx| t.append(&sql, window, cx));
                         cx.notify();

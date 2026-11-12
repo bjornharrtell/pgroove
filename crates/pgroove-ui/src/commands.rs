@@ -89,6 +89,7 @@ impl Workspace {
             CheckUpdates => self.check_updates(true, window, cx),
             InstallUpdate => self.open_update_dialog(window, cx),
             ToggleUpdateChecks => self.toggle_update_checks(cx),
+            ToggleUppercaseSql => self.toggle_uppercase_sql(cx),
         }
     }
 
@@ -106,6 +107,7 @@ impl Workspace {
                 read_only: cx.global::<ReadOnlyMode>().0,
                 update_available: matches!(self.update, UpdateState::Available(_)),
                 auto_check_updates: self.settings.check_for_updates,
+                uppercase_generated_sql: self.settings.uppercase_generated_sql,
                 appearance: self.settings.appearance,
                 light_theme: self.settings.light_theme.clone(),
                 dark_theme: self.settings.dark_theme.clone(),

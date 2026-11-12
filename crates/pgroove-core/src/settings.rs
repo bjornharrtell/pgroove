@@ -72,6 +72,9 @@ pub struct Settings {
     /// The one-time offer to import DBeaver connections has been shown.
     #[serde(default)]
     pub dbeaver_import_offered: bool,
+    /// Write the keywords of generated SQL (Generate SQL in the object tree) in upper case.
+    #[serde(default)]
+    pub uppercase_generated_sql: bool,
 }
 
 fn default_light() -> String {
@@ -100,6 +103,7 @@ impl Default for Settings {
             light_theme: default_light(),
             dark_theme: default_dark(),
             dbeaver_import_offered: false,
+            uppercase_generated_sql: false,
         }
     }
 }
@@ -155,6 +159,7 @@ mod tests {
             light_theme: "My Light".into(),
             dark_theme: "Catppuccin Frappe".into(),
             dbeaver_import_offered: true,
+            uppercase_generated_sql: true,
         };
         off.save(&path).unwrap();
         assert_eq!(Settings::load(&path), off);

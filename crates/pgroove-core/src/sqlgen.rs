@@ -45,6 +45,104 @@ impl Statement {
     }
 }
 
+/// Words the generated statements are written with. Identifiers that happen to be spelled
+/// like one are still the same identifier in upper case; `source`, `target` and `excluded`
+/// are left out because they are names, not keywords.
+const TEMPLATE_KEYWORDS: &[&str] = &[
+    "all",
+    "always",
+    "and",
+    "as",
+    "by",
+    "conflict",
+    "constraint",
+    "create",
+    "default",
+    "delete",
+    "do",
+    "from",
+    "generated",
+    "identity",
+    "insert",
+    "into",
+    "materialized",
+    "matched",
+    "merge",
+    "not",
+    "nothing",
+    "null",
+    "on",
+    "select",
+    "set",
+    "stored",
+    "table",
+    "then",
+    "update",
+    "using",
+    "values",
+    "view",
+    "when",
+    "where",
+];
+
+/// Writes the keywords of generated SQL in upper case. Quoted names, string literals,
+/// comments, `:placeholders`, `::type` casts and the parts of a qualified name are copied
+/// as they are.
+pub fn uppercase_keywords(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Where the text copied as it is ends, when this character starts such text.
+        let verbatim_end = match c {
+            '-' if chars.get(i + 1) == Some(&'-') => Some(
+                chars[i..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(chars.len(), |n| i + n),
+            ),
+            '\'' | '"' => Some(
+                chars[i + 1..]
+                    .iter()
+                    .position(|&q| q == c)
+                    .map_or(chars.len(), |n| i + 2 + n),
+            ),
+            ':' => {
+                // A placeholder or a cast: the colons and the word after them.
+                let start = i + if chars.get(i + 1) == Some(&':') { 2 } else { 1 };
+                Some(
+                    start
+                        + chars[start.min(chars.len())..]
+                            .iter()
+                            .take_while(|&&c| word(c))
+                            .count(),
+                )
+            }
+            _ => None,
+        };
+        if let Some(end) = verbatim_end {
+            out.extend(&chars[i..end]);
+            i = end;
+        } else if word(c) {
+            let end = i + chars[i..].iter().take_while(|&&c| word(c)).count();
+            let text: String = chars[i..end].iter().collect();
+            let qualified = i > 0 && chars[i - 1] == '.';
+            if !qualified && TEMPLATE_KEYWORDS.contains(&text.as_str()) {
+                out.push_str(&text.to_ascii_uppercase());
+            } else {
+                out.push_str(&text);
+            }
+            i = end;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// `merge` arrived in PostgreSQL 15.
 pub fn supports_merge(server_version: &str) -> bool {
     let major: String = server_version
@@ -526,6 +624,85 @@ mod tests {
         assert_eq!(generate(&table(), &st, Statement::UpdateFrom), None);
         assert!(generate(&table(), &st, Statement::Delete).is_some());
         assert!(generate(&table(), &st, Statement::Merge).is_some());
+    }
+
+    #[test]
+    fn keywords_can_be_upper_case() {
+        let up = |s: Statement| uppercase_keywords(&generate(&table(), &orders(true), s).unwrap());
+        assert_eq!(
+            up(Statement::Select),
+            "SELECT id, name, total\nFROM public.orders;\n"
+        );
+        assert_eq!(
+            up(Statement::Insert),
+            "INSERT INTO public.orders (id, name, total)\nVALUES (:id, :name, :total);\n"
+        );
+        assert_eq!(
+            up(Statement::Update),
+            "UPDATE public.orders\nSET name = :name, total = :total\nWHERE id = :id;\n"
+        );
+        assert_eq!(
+            up(Statement::Delete),
+            "DELETE FROM public.orders\nWHERE id = :id;\n"
+        );
+        assert_eq!(
+            up(Statement::InsertOnConflict),
+            "INSERT INTO public.orders (id, name, total)\nVALUES (:id, :name, :total)\n\
+             ON CONFLICT (id) DO UPDATE\nSET name = excluded.name, total = excluded.total;\n"
+        );
+        assert_eq!(
+            up(Statement::UpdateFrom),
+            "-- replace `source` with the relation to update from\n\
+             UPDATE public.orders AS target\n\
+             SET name = source.name, total = source.total\n\
+             FROM public.orders AS source\n\
+             WHERE target.id = source.id\n  AND target.id = :id;\n"
+        );
+        assert_eq!(
+            up(Statement::DeleteUsing),
+            "-- replace `source` with the relation to delete using\n\
+             DELETE FROM public.orders AS target\n\
+             USING public.orders AS source\n\
+             WHERE target.id = source.id\n  AND target.id = :id;\n"
+        );
+        let merge = up(Statement::Merge);
+        assert!(
+            merge.starts_with(
+                "MERGE INTO public.orders AS target\nUSING public.orders AS source\nON "
+            )
+        );
+        assert!(merge.contains("WHEN MATCHED THEN UPDATE\n  SET "));
+        assert!(merge.contains(
+            "WHEN NOT MATCHED THEN INSERT (id, name, total)\n  VALUES (:id, :name, :total)"
+        ));
+    }
+
+    #[test]
+    fn upper_case_leaves_names_and_text_alone() {
+        // A quoted name, a placeholder, a cast, a qualified part and a comment that are
+        // spelled like keywords stay as they are; the keywords around them change.
+        assert_eq!(
+            uppercase_keywords(
+                "select \"from\", :where, x::table, t.select from \"a b\".values; -- not null\n"
+            ),
+            "SELECT \"from\", :where, x::table, t.select FROM \"a b\".values; -- not null\n"
+        );
+        // A name that merely contains a keyword is not one, and a lone word is handled.
+        assert_eq!(
+            uppercase_keywords("selected setting order_by"),
+            "selected setting order_by"
+        );
+        assert_eq!(uppercase_keywords("where"), "WHERE");
+        assert_eq!(uppercase_keywords(""), "");
+        // An unterminated quote or comment runs to the end instead of panicking.
+        assert_eq!(uppercase_keywords("select 'oops from"), "SELECT 'oops from");
+        assert_eq!(uppercase_keywords("select -- from"), "SELECT -- from");
+        assert_eq!(uppercase_keywords("select :"), "SELECT :");
+        // Non-ASCII text passes through.
+        assert_eq!(
+            uppercase_keywords("select \"åge\" from t"),
+            "SELECT \"åge\" FROM t"
+        );
     }
 
     #[test]
