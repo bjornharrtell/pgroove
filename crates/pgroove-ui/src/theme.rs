@@ -1,6 +1,7 @@
 //! Theme installation and switching: bundled Catppuccin flavors, user theme files, and the
 //! appearance setting (follow the system, always light, always dark).
 
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
 use pgroove_core::settings::{Appearance, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, Settings};
@@ -12,10 +13,12 @@ const BUILTIN: &str = include_str!("../themes/catppuccin.json");
 /// Corner radius of the application window.
 const WINDOW_RADIUS: f32 = 10.;
 
-/// Re-applies the settings that must survive a theme change: the window radius, and no kit
+/// Re-applies the settings that must survive a theme change: the window radius, no kit
 /// highlight on the table's clicked cell (the result grid draws its own selection, and the
-/// kit's can go stale after a drag).
+/// kit's can go stale after a drag), and scrollbars that stay visible, so a grid that is
+/// wider or longer than its pane shows that there is more in every direction.
 fn tweak(cx: &mut App) {
+    Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
     Theme::update(cx, |t| {
         t.window_radius = px(WINDOW_RADIUS);
         t.table_active = transparent_black();
