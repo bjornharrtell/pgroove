@@ -449,8 +449,10 @@ impl QueryTab {
             return;
         }
         let formatted = pgroove_core::format::format_sql(&text);
+        // `replace_all` records the change, so Ctrl+Z restores the unformatted text;
+        // `set_value` would clear the undo history.
         self.editor
-            .update(cx, |e, cx| e.set_value(formatted, window, cx));
+            .update(cx, |e, cx| e.replace_all(formatted, window, cx));
     }
 
     pub(crate) fn explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
