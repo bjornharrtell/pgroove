@@ -15,6 +15,9 @@ pub const MAX_ROWS: usize = 10_000;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResultSet {
     pub columns: Vec<String>,
+    /// The server's type name of each column, when known (empty for statements run as a
+    /// script, which are not described). Used for column header tooltips.
+    pub types: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
     /// Rows returned or affected, as reported by the server.
     pub count: u64,
@@ -263,6 +266,45 @@ async fn run_one(
     limit: usize,
     char_start: usize,
 ) -> Result<Vec<ResultSet>> {
+    let mut sets = run_one_untyped(client, text, limit, char_start).await?;
+    add_types(client, text, &mut sets).await;
+    Ok(sets)
+}
+
+/// Fills in the column types of a statement's single result set. The statement is parsed
+/// and described by the server, not executed; any failure leaves the types empty.
+async fn add_types(client: &Client, text: &str, sets: &mut [ResultSet]) {
+    let Some(set) = describable(sets) else {
+        return;
+    };
+    if let Ok(stmt) = client.prepare(text).await {
+        let types = stmt.columns().iter().map(|c| c.type_().name().to_string());
+        set_types(set, types.collect());
+    }
+}
+
+/// The one result set that has columns, when the statement produced exactly one.
+fn describable(sets: &mut [ResultSet]) -> Option<&mut ResultSet> {
+    match sets {
+        [set] if !set.columns.is_empty() => Some(set),
+        _ => None,
+    }
+}
+
+/// Records `types` when there is one per column; a mismatch means the description does not
+/// belong to this result, so the set keeps none.
+fn set_types(set: &mut ResultSet, types: Vec<String>) {
+    if types.len() == set.columns.len() {
+        set.types = types;
+    }
+}
+
+async fn run_one_untyped(
+    client: &Client,
+    text: &str,
+    limit: usize,
+    char_start: usize,
+) -> Result<Vec<ResultSet>> {
     if sqlsplit::is_select_like(text) {
         let capped = wrapped(text, limit);
         match client.simple_query(&capped).await {
@@ -377,6 +419,7 @@ mod tests {
             rows: vec![vec![Some("1".into())]],
             count: 1,
             truncated: false,
+            types: vec![],
         }]);
         let set = o.last_rowset().unwrap();
         assert!(
@@ -398,6 +441,7 @@ mod tests {
                 rows: vec![vec![Some("1".into())]],
                 count: 1,
                 truncated: false,
+                types: vec![],
             },
             ResultSet {
                 count: 3,
@@ -408,6 +452,7 @@ mod tests {
                 rows: vec![vec![None]; 2],
                 count: 5,
                 truncated: true,
+                types: vec![],
             },
         ]);
         assert_eq!(o.last_rowset().unwrap().columns, ["b"]);
@@ -540,6 +585,50 @@ mod tests {
         assert_eq!(qe.span_in("select * from nope"), Some(14..18));
         client.simple_query("select 1").await.unwrap();
         cancel(&client).await.unwrap();
+    }
+
+    #[test]
+    fn types_are_kept_only_when_they_fit_the_columns() {
+        let set = |cols: &[&str]| ResultSet {
+            columns: cols.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut s = set(&["a", "b"]);
+        set_types(&mut s, vec!["int4".into()]);
+        assert!(
+            s.types.is_empty(),
+            "a description of another shape is dropped"
+        );
+        set_types(&mut s, vec!["int4".into(), "text".into()]);
+        assert_eq!(s.types, ["int4", "text"]);
+
+        // Only a lone set with columns can be described.
+        assert!(describable(&mut [set(&["a"])]).is_some());
+        assert!(
+            describable(&mut [set(&[])]).is_none(),
+            "a command has no columns"
+        );
+        assert!(describable(&mut [set(&["a"]), set(&["b"])]).is_none());
+        assert!(describable(&mut []).is_none());
+    }
+
+    /// Needs `PGROOVE_TEST_PG` (see `connect` tests).
+    #[tokio::test]
+    async fn columns_report_their_types_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        let o = run(
+            &client,
+            "select 1 as a, now() as b, 'x'::text as c, '{}'::jsonb as d",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o.sets[0].types, ["int4", "timestamptz", "text", "jsonb"]);
+        // A script is not described, so its sets carry no types.
+        let o = run(&client, "select 1; select 2", 10).await.unwrap();
+        assert!(o.sets.iter().all(|s| s.types.is_empty()));
     }
 
     /// Needs `PGROOVE_TEST_PG` (see `connect` tests).
@@ -693,6 +782,7 @@ mod tests {
                 rows: vec![vec![None]; 2],
                 count: 2,
                 truncated: true,
+                types: vec![],
             }]),
             elapsed: Duration::from_millis(1),
             limit: Some(2),

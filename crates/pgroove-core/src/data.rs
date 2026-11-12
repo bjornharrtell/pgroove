@@ -162,6 +162,7 @@ pub async fn fetch_page(client: &Client, table: &TableRef, req: &PageRequest) ->
         // The last two columns carry the row ids; take them out of the data.
         let keep = data.columns.len().saturating_sub(2);
         data.columns.truncate(keep);
+        data.types.truncate(keep);
         for row in &mut data.rows {
             let xmin = row.pop().flatten().unwrap_or_default();
             let ctid = row.pop().flatten().unwrap_or_default();

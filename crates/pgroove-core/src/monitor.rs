@@ -186,6 +186,7 @@ mod tests {
             ],
             count: 3,
             truncated: false,
+            types: vec![],
         };
         assert_eq!(row_pid(View::Sessions, &set, 0), Some(42));
         assert_eq!(row_pid(View::Sessions, &set, 1), None);

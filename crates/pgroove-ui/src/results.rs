@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::edit::{EditSession, InsertValue};
@@ -49,6 +50,14 @@ fn column_width(name: &str, rows: &[Vec<Option<String>>], col: usize) -> f32 {
         .unwrap_or(0)
         .max(name.chars().count() + 3);
     (longest as f32 * 7.5 + 28.0).clamp(80.0, 360.0)
+}
+
+/// Tooltip of a column header: the full name, which a narrow column clips, and the type.
+fn header_tip(name: &str, type_name: Option<&str>) -> String {
+    match type_name {
+        Some(t) => format!("{name}\n{t}"),
+        None => name.to_string(),
+    }
 }
 
 /// True when the sampled values of a column are all numbers (and not all NULL).
@@ -252,6 +261,11 @@ impl ResultsTable {
         self.rows().get(row)?.get(col)?.as_deref()
     }
 
+    /// The server's type name of data column `col`, when the result was described.
+    fn type_of(&self, col: usize) -> Option<&str> {
+        self.set.as_ref()?.types.get(col).map(String::as_str)
+    }
+
     /// What the grid draws in a cell: an inserted cell keeps a default apart from a NULL.
     fn shown(&self, row: usize, col: usize) -> Shown<'_> {
         match self.session.as_ref().and_then(|s| s.insert_value(row, col)) {
@@ -295,14 +309,26 @@ impl TableDelegate for ResultsTable {
     ) -> impl IntoElement {
         // The corner above the row numbers marks everything.
         match col_ix.checked_sub(GUTTER) {
-            Some(i) => div().w_full().child(self.columns[i].name.clone()),
-            None => div().w_full().h_full().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|state, _: &MouseDownEvent, _, cx| {
-                    state.delegate_mut().select_all();
-                    cx.notify();
-                }),
-            ),
+            Some(i) => {
+                let tip = header_tip(&self.columns[i].name, self.type_of(i));
+                div()
+                    .id(SharedString::from(format!("th-{i}")))
+                    .w_full()
+                    .child(self.columns[i].name.clone())
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .into_any_element()
+            }
+            None => div()
+                .w_full()
+                .h_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|state, _: &MouseDownEvent, _, cx| {
+                        state.delegate_mut().select_all();
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
         }
     }
 
@@ -455,9 +481,34 @@ fn selection_layer(m: Marking, color: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::ResultsTable;
+    use super::{ResultsTable, header_tip};
     use pgroove_core::query::ResultSet;
     use std::sync::Arc;
+
+    #[test]
+    fn header_tip_names_the_type() {
+        assert_eq!(
+            header_tip("created_at", Some("timestamptz")),
+            "created_at\ntimestamptz"
+        );
+        assert_eq!(header_tip("created_at", None), "created_at");
+    }
+
+    #[test]
+    fn types_follow_the_result_set() {
+        let mut t = ResultsTable::default();
+        assert_eq!(t.type_of(0), None);
+        t.set(shared(ResultSet {
+            columns: vec!["a".into(), "b".into()],
+            types: vec!["int4".into(), "text".into()],
+            rows: vec![vec![Some("1".into()), None]],
+            count: 1,
+            truncated: false,
+        }));
+        assert_eq!(t.type_of(0), Some("int4"));
+        assert_eq!(t.type_of(1), Some("text"));
+        assert_eq!(t.type_of(2), None);
+    }
 
     fn shared(set: ResultSet) -> Option<Arc<ResultSet>> {
         Some(Arc::new(set))
@@ -471,6 +522,7 @@ mod tests {
             rows: vec![vec![Some("1".into()), None]],
             count: 1,
             truncated: false,
+            types: vec![],
         }));
         assert_eq!(t.columns.len(), 2);
         assert_eq!(t.cell(0, 0), Some("1"));
@@ -501,6 +553,7 @@ mod tests {
             rows: vec![vec![Some("1".into()), None]],
             count: 1,
             truncated: false,
+            types: vec![],
         }));
         assert_eq!(t.shown(0, 0), Shown::Text("1"));
         assert_eq!(t.shown(0, 1), Shown::Null, "a stored NULL stays NULL");
@@ -530,6 +583,7 @@ mod tests {
             ],
             count: 2,
             truncated: false,
+            types: vec![],
         });
         t.set(Some(set.clone()));
         assert_eq!(Arc::strong_count(&set), 2, "the tab and the grid share it");
@@ -562,6 +616,7 @@ mod tests {
             ],
             count: 2,
             truncated: false,
+            types: vec![],
         }));
         assert_eq!(t.copy_text(false), None);
         t.press((0, 0), Mods::default());
