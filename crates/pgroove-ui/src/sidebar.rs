@@ -241,8 +241,8 @@ impl Workspace {
                 row.context_menu(move |menu, window, cx| {
                     let qualified = format!(
                         "{}.{}",
-                        pgroove_core::data::quote_ident(&s),
-                        pgroove_core::data::quote_ident(&n)
+                        pgroove_core::data::pretty_ident(&s),
+                        pgroove_core::data::pretty_ident(&n)
                     );
                     let table = TableRef::new(s.clone(), n.clone());
                     let mut menu = menu;

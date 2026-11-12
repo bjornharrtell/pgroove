@@ -1,7 +1,7 @@
 //! SQL statements generated from a table's structure, for the object tree's
 //! context menu. Pure: the caller loads the structure, this renders the text.
 
-use crate::data::{TableRef, quote_ident};
+use crate::data::{TableRef, pretty_ident};
 use crate::structure::{ConstraintInfo, Structure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +124,7 @@ fn updated_columns<'a>(st: &'a Structure, key: &[String]) -> Vec<&'a str> {
 fn quoted(columns: &[&str]) -> String {
     columns
         .iter()
-        .map(|c| quote_ident(c))
+        .map(|c| pretty_ident(c))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -133,7 +133,7 @@ fn quoted(columns: &[&str]) -> String {
 fn assignments(columns: &[&str], prefix: &str) -> String {
     columns
         .iter()
-        .map(|c| format!("{prefix}{} = {}", quote_ident(c), placeholder(c)))
+        .map(|c| format!("{prefix}{} = {}", pretty_ident(c), placeholder(c)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -141,7 +141,7 @@ fn assignments(columns: &[&str], prefix: &str) -> String {
 /// `<prefix>a = :a` lines joined with `and`, for use after `where`.
 fn key_filter(key: &[String], prefix: &str) -> String {
     key.iter()
-        .map(|c| format!("{prefix}{} = {}", quote_ident(c), placeholder(c)))
+        .map(|c| format!("{prefix}{} = {}", pretty_ident(c), placeholder(c)))
         .collect::<Vec<_>>()
         .join("\n  and ")
 }
@@ -149,7 +149,7 @@ fn key_filter(key: &[String], prefix: &str) -> String {
 /// `<left>.a = <right>.a` lines joined with `and`, for a join condition.
 fn join_on(key: &[String], left: &str, right: &str) -> String {
     key.iter()
-        .map(|c| format!("{left}.{} = {right}.{}", quote_ident(c), quote_ident(c)))
+        .map(|c| format!("{left}.{} = {right}.{}", pretty_ident(c), pretty_ident(c)))
         .collect::<Vec<_>>()
         .join("\n  and ")
 }
@@ -159,7 +159,7 @@ fn copied_assignments(columns: &[&str], prefix: &str) -> String {
     columns
         .iter()
         .map(|c| {
-            let c = quote_ident(c);
+            let c = pretty_ident(c);
             format!("{c} = {prefix}.{c}")
         })
         .collect::<Vec<_>>()
@@ -173,13 +173,13 @@ fn select(table: &TableRef, st: &Structure) -> String {
     } else {
         quoted(&columns)
     };
-    format!("select {list}\nfrom {};\n", table.qualified())
+    format!("select {list}\nfrom {};\n", table.pretty())
 }
 
 fn insert(table: &TableRef, st: &Structure) -> String {
     let columns = value_columns(st);
     if columns.is_empty() {
-        return format!("insert into {} default values;\n", table.qualified());
+        return format!("insert into {} default values;\n", table.pretty());
     }
     let values = columns
         .iter()
@@ -188,7 +188,7 @@ fn insert(table: &TableRef, st: &Structure) -> String {
         .join(", ");
     format!(
         "insert into {} ({})\nvalues ({});\n",
-        table.qualified(),
+        table.pretty(),
         quoted(&columns),
         values
     )
@@ -201,7 +201,7 @@ fn insert_on_conflict(table: &TableRef, st: &Structure) -> Option<String> {
     }
     let target = key
         .iter()
-        .map(|c| quote_ident(c))
+        .map(|c| pretty_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let conflict = match updated_columns(st, &key) {
@@ -209,7 +209,7 @@ fn insert_on_conflict(table: &TableRef, st: &Structure) -> Option<String> {
         columns => {
             let set = columns
                 .iter()
-                .map(|c| format!("{} = excluded.{}", quote_ident(c), quote_ident(c)))
+                .map(|c| format!("{} = excluded.{}", pretty_ident(c), pretty_ident(c)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("do update\nset {set}")
@@ -228,7 +228,7 @@ fn update(table: &TableRef, st: &Structure) -> Option<String> {
     }
     Some(format!(
         "update {}\nset {}\nwhere {};\n",
-        table.qualified(),
+        table.pretty(),
         assignments(&set, ""),
         key_filter(&key, "")
     ))
@@ -240,7 +240,7 @@ fn update_from(table: &TableRef, st: &Structure) -> Option<String> {
     if key.is_empty() || set.is_empty() {
         return None;
     }
-    let qualified = table.qualified();
+    let qualified = table.pretty();
     Some(format!(
         "-- replace `source` with the relation to update from\n\
          update {qualified} as target\n\
@@ -260,7 +260,7 @@ fn delete(table: &TableRef, st: &Structure) -> Option<String> {
     }
     Some(format!(
         "delete from {}\nwhere {};\n",
-        table.qualified(),
+        table.pretty(),
         key_filter(&key, "")
     ))
 }
@@ -270,7 +270,7 @@ fn delete_using(table: &TableRef, st: &Structure) -> Option<String> {
     if key.is_empty() {
         return None;
     }
-    let qualified = table.qualified();
+    let qualified = table.pretty();
     Some(format!(
         "-- replace `source` with the relation to delete using\n\
          delete from {qualified} as target\n\
@@ -286,7 +286,7 @@ fn merge(table: &TableRef, st: &Structure) -> Option<String> {
     if key.is_empty() {
         return None;
     }
-    let qualified = table.qualified();
+    let qualified = table.pretty();
     let mut arms: Vec<String> = Vec::new();
     let set = updated_columns(st, &key);
     if !set.is_empty() {
@@ -370,7 +370,7 @@ mod tests {
     fn select_lists_the_columns() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::Select).unwrap(),
-            "select \"id\", \"name\", \"total\"\nfrom \"public\".\"orders\";\n"
+            "select id, name, total\nfrom public.orders;\n"
         );
     }
 
@@ -378,7 +378,7 @@ mod tests {
     fn insert_names_a_placeholder_per_column() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::Insert).unwrap(),
-            "insert into \"public\".\"orders\" (\"id\", \"name\", \"total\")\nvalues (:id, :name, :total);\n"
+            "insert into public.orders (id, name, total)\nvalues (:id, :name, :total);\n"
         );
     }
 
@@ -389,7 +389,7 @@ mod tests {
         st.columns[2].generated = true;
         assert_eq!(
             generate(&table(), &st, Statement::Insert).unwrap(),
-            "insert into \"public\".\"orders\" (\"name\")\nvalues (:name);\n"
+            "insert into public.orders (name)\nvalues (:name);\n"
         );
         // Every column is supplied by the server: the row still gets inserted.
         let mut st = orders(true);
@@ -398,7 +398,7 @@ mod tests {
         st.columns[2].generated = true;
         assert_eq!(
             generate(&table(), &st, Statement::Insert).unwrap(),
-            "insert into \"public\".\"orders\" default values;\n"
+            "insert into public.orders default values;\n"
         );
     }
 
@@ -406,15 +406,15 @@ mod tests {
     fn insert_on_conflict_updates_from_excluded() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::InsertOnConflict).unwrap(),
-            "insert into \"public\".\"orders\" (\"id\", \"name\", \"total\")\nvalues (:id, :name, :total)\n\
-             on conflict (\"id\") do update\nset \"name\" = excluded.\"name\", \"total\" = excluded.\"total\";\n"
+            "insert into public.orders (id, name, total)\nvalues (:id, :name, :total)\n\
+             on conflict (id) do update\nset name = excluded.name, total = excluded.total;\n"
         );
         // Nothing outside the key: there is nothing to update.
         let mut st = orders(true);
         st.columns = vec![column("id")];
         assert_eq!(
             generate(&table(), &st, Statement::InsertOnConflict).unwrap(),
-            "insert into \"public\".\"orders\" (\"id\")\nvalues (:id)\non conflict (\"id\") do nothing;\n"
+            "insert into public.orders (id)\nvalues (:id)\non conflict (id) do nothing;\n"
         );
     }
 
@@ -425,7 +425,7 @@ mod tests {
         assert!(
             generate(&table(), &st, Statement::InsertOnConflict)
                 .unwrap()
-                .contains("on conflict (\"name\") do update")
+                .contains("on conflict (name) do update")
         );
     }
 
@@ -433,14 +433,14 @@ mod tests {
     fn update_sets_the_rest_and_filters_on_the_key() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::Update).unwrap(),
-            "update \"public\".\"orders\"\nset \"name\" = :name, \"total\" = :total\nwhere \"id\" = :id;\n"
+            "update public.orders\nset name = :name, total = :total\nwhere id = :id;\n"
         );
         // Composite keys filter on every part.
         let mut st = orders(false);
         st.constraints.push(key('p', &["id", "name"]));
         assert_eq!(
             generate(&table(), &st, Statement::Update).unwrap(),
-            "update \"public\".\"orders\"\nset \"total\" = :total\nwhere \"id\" = :id\n  and \"name\" = :name;\n"
+            "update public.orders\nset total = :total\nwhere id = :id\n  and name = :name;\n"
         );
     }
 
@@ -449,10 +449,10 @@ mod tests {
         assert_eq!(
             generate(&table(), &orders(true), Statement::UpdateFrom).unwrap(),
             "-- replace `source` with the relation to update from\n\
-             update \"public\".\"orders\" as target\n\
-             set \"name\" = source.\"name\", \"total\" = source.\"total\"\n\
-             from \"public\".\"orders\" as source\n\
-             where target.\"id\" = source.\"id\"\n  and target.\"id\" = :id;\n"
+             update public.orders as target\n\
+             set name = source.name, total = source.total\n\
+             from public.orders as source\n\
+             where target.id = source.id\n  and target.id = :id;\n"
         );
     }
 
@@ -460,7 +460,7 @@ mod tests {
     fn delete_filters_on_the_key() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::Delete).unwrap(),
-            "delete from \"public\".\"orders\"\nwhere \"id\" = :id;\n"
+            "delete from public.orders\nwhere id = :id;\n"
         );
     }
 
@@ -469,9 +469,9 @@ mod tests {
         assert_eq!(
             generate(&table(), &orders(true), Statement::DeleteUsing).unwrap(),
             "-- replace `source` with the relation to delete using\n\
-             delete from \"public\".\"orders\" as target\n\
-             using \"public\".\"orders\" as source\n\
-             where target.\"id\" = source.\"id\"\n  and target.\"id\" = :id;\n"
+             delete from public.orders as target\n\
+             using public.orders as source\n\
+             where target.id = source.id\n  and target.id = :id;\n"
         );
     }
 
@@ -479,10 +479,10 @@ mod tests {
     fn merge_covers_matched_and_missing_rows() {
         assert_eq!(
             generate(&table(), &orders(true), Statement::Merge).unwrap(),
-            "merge into \"public\".\"orders\" as target\nusing \"public\".\"orders\" as source\n\
-             on target.\"id\" = source.\"id\"\n\
-             when matched then update\n  set \"name\" = :name, \"total\" = :total\n\
-             when not matched then insert (\"id\", \"name\", \"total\")\n  values (:id, :name, :total);\n"
+            "merge into public.orders as target\nusing public.orders as source\n\
+             on target.id = source.id\n\
+             when matched then update\n  set name = :name, total = :total\n\
+             when not matched then insert (id, name, total)\n  values (:id, :name, :total);\n"
         );
     }
 
@@ -529,17 +529,33 @@ mod tests {
     }
 
     #[test]
+    fn only_names_that_need_it_are_quoted() {
+        let mut st = orders(true);
+        st.columns = vec![column("select"), column("Total Amount"), column("qty")];
+        st.constraints = vec![key('p', &["select"])];
+        assert_eq!(
+            generate(&table(), &st, Statement::Select).unwrap(),
+            "select \"select\", \"Total Amount\", qty\nfrom public.orders;\n"
+        );
+        let t = TableRef::new("Sales", "user");
+        assert_eq!(
+            generate(&t, &st, Statement::Delete).unwrap(),
+            "delete from \"Sales\".\"user\"\nwhere \"select\" = :select;\n"
+        );
+    }
+
+    #[test]
     fn identifiers_are_quoted_but_placeholders_are_not() {
         let mut st = orders(true);
         st.columns = vec![column("select"), column("Total Amount")];
         st.constraints = vec![key('p', &["select"])];
         assert_eq!(
             generate(&table(), &st, Statement::Select).unwrap(),
-            "select \"select\", \"Total Amount\"\nfrom \"public\".\"orders\";\n"
+            "select \"select\", \"Total Amount\"\nfrom public.orders;\n"
         );
         assert_eq!(
             generate(&table(), &st, Statement::Update).unwrap(),
-            "update \"public\".\"orders\"\nset \"Total Amount\" = :total_amount\n\
+            "update public.orders\nset \"Total Amount\" = :total_amount\n\
              where \"select\" = :select;\n"
         );
     }

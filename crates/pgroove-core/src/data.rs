@@ -25,11 +25,30 @@ impl TableRef {
     pub fn qualified(&self) -> String {
         format!("{}.{}", quote_ident(&self.schema), quote_ident(&self.name))
     }
+
+    /// The name as written in SQL a person reads: quotes only where needed.
+    pub fn pretty(&self) -> String {
+        format!(
+            "{}.{}",
+            pretty_ident(&self.schema),
+            pretty_ident(&self.name)
+        )
+    }
 }
 
 /// Quotes an identifier, doubling embedded quotes.
 pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Quotes an identifier only when it has to be, for generated SQL that a person
+/// reads and edits. Execution paths keep using [`quote_ident`].
+pub fn pretty_ident(s: &str) -> String {
+    if crate::ident::needs_quotes(s) {
+        quote_ident(s)
+    } else {
+        s.to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +187,16 @@ mod tests {
             TableRef::new("public", "T x").qualified(),
             "\"public\".\"T x\""
         );
+    }
+
+    #[test]
+    fn pretty_quotes_only_when_needed() {
+        assert_eq!(pretty_ident("orders"), "orders");
+        assert_eq!(pretty_ident("Orders"), "\"Orders\"");
+        assert_eq!(pretty_ident("user"), "\"user\"");
+        assert_eq!(pretty_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(TableRef::new("public", "orders").pretty(), "public.orders");
+        assert_eq!(TableRef::new("public", "T x").pretty(), "public.\"T x\"");
     }
 
     #[test]
