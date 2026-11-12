@@ -14,11 +14,21 @@ use pgroove_core::export;
 use pgroove_core::query;
 use pgroove_core::query::ResultSet;
 
-use crate::results::ResultsTable;
+use crate::results::{Jump, ResultsTable};
 
 actions!(
     result_grid,
-    [CopyCells, CopyCellsWithHeaders, SelectAllCells]
+    [
+        CopyCells,
+        CopyCellsWithHeaders,
+        SelectAllCells,
+        JumpFirst,
+        JumpLast,
+        JumpTop,
+        JumpBottom,
+        JumpRowStart,
+        JumpRowEnd
+    ]
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,6 +214,16 @@ impl GridPane {
             let (rows, cols) = (g.delegate().row_total(), g.delegate().names().len());
             g.delegate_mut().selection_mut().select_all(rows, cols);
             cx.notify();
+        });
+    }
+
+    /// Moves the selection to the cell a jump key names (Ctrl+Home, Ctrl+End, Ctrl+Up, ...).
+    /// The kit scrolls to it and reports it like any keyboard move.
+    fn jump(&mut self, jump: Jump, cx: &mut Context<Self>) {
+        self.grid.update(cx, |g, cx| {
+            if let Some((row, col)) = g.delegate().jump_target(jump, g.selected_cell()) {
+                g.set_selected_cell(row, col, cx);
+            }
         });
     }
 
@@ -437,6 +457,13 @@ impl Render for GridPane {
         });
         let on_select_all =
             cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all_cells(cx));
+        let on_first = cx.listener(|this, _: &JumpFirst, _, cx| this.jump(Jump::First, cx));
+        let on_last = cx.listener(|this, _: &JumpLast, _, cx| this.jump(Jump::Last, cx));
+        let on_top = cx.listener(|this, _: &JumpTop, _, cx| this.jump(Jump::Top, cx));
+        let on_bottom = cx.listener(|this, _: &JumpBottom, _, cx| this.jump(Jump::Bottom, cx));
+        let on_row_start =
+            cx.listener(|this, _: &JumpRowStart, _, cx| this.jump(Jump::RowStart, cx));
+        let on_row_end = cx.listener(|this, _: &JumpRowEnd, _, cx| this.jump(Jump::RowEnd, cx));
         let inspector = self.render_inspector(cx);
         let show_inspector = inspector.is_some();
         let grid = self.grid.clone();
@@ -446,6 +473,12 @@ impl Render for GridPane {
             .on_action(on_copy)
             .on_action(on_copy_headers)
             .on_action(on_select_all)
+            .on_action(on_first)
+            .on_action(on_last)
+            .on_action(on_top)
+            .on_action(on_bottom)
+            .on_action(on_row_start)
+            .on_action(on_row_end)
             // A drag that ends outside the cells still ends.
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 grid.update(cx, |g, _| g.delegate_mut().selection_mut().release());

@@ -101,6 +101,18 @@ pub fn init(cx: &mut App) {
         ),
         KeyBinding::new("ctrl-a", grid_pane::SelectAllCells, Some("ResultGrid")),
         KeyBinding::new("cmd-a", grid_pane::SelectAllCells, Some("ResultGrid")),
+        // The kit moves by cell, page, and to the ends of the row; these go to the ends of
+        // the grid and of the column, as in a spreadsheet.
+        KeyBinding::new("ctrl-home", grid_pane::JumpFirst, Some("ResultGrid")),
+        KeyBinding::new("ctrl-end", grid_pane::JumpLast, Some("ResultGrid")),
+        KeyBinding::new("ctrl-up", grid_pane::JumpTop, Some("ResultGrid")),
+        KeyBinding::new("ctrl-down", grid_pane::JumpBottom, Some("ResultGrid")),
+        KeyBinding::new("ctrl-left", grid_pane::JumpRowStart, Some("ResultGrid")),
+        KeyBinding::new("ctrl-right", grid_pane::JumpRowEnd, Some("ResultGrid")),
+        KeyBinding::new("cmd-up", grid_pane::JumpTop, Some("ResultGrid")),
+        KeyBinding::new("cmd-down", grid_pane::JumpBottom, Some("ResultGrid")),
+        KeyBinding::new("cmd-left", grid_pane::JumpRowStart, Some("ResultGrid")),
+        KeyBinding::new("cmd-right", grid_pane::JumpRowEnd, Some("ResultGrid")),
     ]);
     // Always a way to leave, whatever the window frame shows.
     cx.on_action(|_: &Quit, cx| cx.quit());

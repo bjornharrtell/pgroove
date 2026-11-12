@@ -39,6 +39,23 @@ fn gutter_width(rows: usize) -> f32 {
     (digits * 8.0 + 24.0).max(44.0)
 }
 
+/// Where a jump key sends the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jump {
+    /// First row, first column.
+    First,
+    /// Last row, last column.
+    Last,
+    /// First row, same column.
+    Top,
+    /// Last row, same column.
+    Bottom,
+    /// Same row, first column.
+    RowStart,
+    /// Same row, last column.
+    RowEnd,
+}
+
 /// Pixel width for a column: wide enough for its header and sampled values.
 fn column_width(name: &str, rows: &[Vec<Option<String>>], col: usize) -> f32 {
     let longest = rows
@@ -252,6 +269,30 @@ impl ResultsTable {
                 self.numeric.clear();
             }
         }
+    }
+
+    /// The kit cell (gutter included) a jump key moves to from `current`, or `None` when the
+    /// grid has no cells. With nothing selected a jump starts from the first cell.
+    pub fn jump_target(
+        &self,
+        jump: Jump,
+        current: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        let (rows, cols) = (self.row_total(), self.columns.len());
+        if rows == 0 || cols == 0 {
+            return None;
+        }
+        let (row, col) = current.unwrap_or((0, GUTTER));
+        let (row, col) = (row.min(rows - 1), col.clamp(GUTTER, GUTTER + cols - 1));
+        let (first, last) = (GUTTER, GUTTER + cols - 1);
+        Some(match jump {
+            Jump::First => (0, first),
+            Jump::Last => (rows - 1, last),
+            Jump::Top => (0, col),
+            Jump::Bottom => (rows - 1, col),
+            Jump::RowStart => (row, first),
+            Jump::RowEnd => (row, last),
+        })
     }
 
     pub fn cell(&self, row: usize, col: usize) -> Option<&str> {
@@ -481,9 +522,34 @@ fn selection_layer(m: Marking, color: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResultsTable, header_tip};
+    use super::{Jump, ResultsTable, header_tip};
     use pgroove_core::query::ResultSet;
     use std::sync::Arc;
+
+    #[test]
+    fn jumps_stay_inside_the_grid() {
+        let mut t = ResultsTable::default();
+        assert_eq!(t.jump_target(Jump::First, None), None, "no cells");
+        t.set(shared(ResultSet {
+            columns: vec!["a".into(), "b".into(), "c".into()],
+            rows: vec![vec![None; 3]; 5],
+            count: 5,
+            truncated: false,
+            types: vec![],
+        }));
+        // Kit columns count the row-number gutter, so data starts at 1.
+        let from = Some((2, 2));
+        assert_eq!(t.jump_target(Jump::First, from), Some((0, 1)));
+        assert_eq!(t.jump_target(Jump::Last, from), Some((4, 3)));
+        assert_eq!(t.jump_target(Jump::Top, from), Some((0, 2)));
+        assert_eq!(t.jump_target(Jump::Bottom, from), Some((4, 2)));
+        assert_eq!(t.jump_target(Jump::RowStart, from), Some((2, 1)));
+        assert_eq!(t.jump_target(Jump::RowEnd, from), Some((2, 3)));
+        // Nothing selected starts from the first cell; a stale cell is pulled back in.
+        assert_eq!(t.jump_target(Jump::RowEnd, None), Some((0, 3)));
+        assert_eq!(t.jump_target(Jump::Bottom, Some((99, 99))), Some((4, 3)));
+        assert_eq!(t.jump_target(Jump::RowStart, Some((1, 0))), Some((1, 1)));
+    }
 
     #[test]
     fn header_tip_names_the_type() {
