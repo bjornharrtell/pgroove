@@ -208,29 +208,42 @@ mod tests {
         assert!(KEYWORDS.windows(2).all(|w| w[0] < w[1]));
     }
 
-    /// The rule and the keyword list agree with the server's own `quote_ident`.
+    /// The rule never leaves bare a name the server would quote. Servers older than the one
+    /// the keyword list was taken from may bare words we quote, which is harmless, so a
+    /// keyword is only compared one way; other names must agree exactly.
     #[tokio::test]
     async fn agrees_with_the_server() {
         let Some((client, _)) = crate::connect::test_connection().await else {
             return;
         };
-        let mut names: Vec<String> = client
+        let words: Vec<String> = client
             .query("select word from pg_get_keywords()", &[])
             .await
             .unwrap()
             .iter()
             .map(|r| r.get(0))
             .collect();
-        names.extend(
-            ["orders", "Orders", "_x", "1a", "a b", "a$1", "é", "x_1", ""].map(String::from),
-        );
-        for name in names {
+        let plain =
+            ["orders", "Orders", "_x", "1a", "a b", "a$1", "é", "x_1", ""].map(String::from);
+        for (name, keyword) in words
+            .into_iter()
+            .map(|w| (w, true))
+            .chain(plain.into_iter().map(|w| (w, false)))
+        {
             let quoted: String = client
                 .query_one("select quote_ident($1)", &[&name])
                 .await
                 .unwrap()
                 .get(0);
-            assert_eq!(needs_quotes(&name), quoted.starts_with('"'), "{name:?}");
+            let server = quoted.starts_with('"');
+            if keyword {
+                assert!(
+                    !server || needs_quotes(&name),
+                    "{name:?} is bare but the server quotes it"
+                );
+            } else {
+                assert_eq!(needs_quotes(&name), server, "{name:?}");
+            }
         }
     }
 }
