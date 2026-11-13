@@ -527,6 +527,7 @@ impl Workspace {
             }
             None => ("No connection".to_string(), theme.muted_foreground),
         };
+        let accent = focused.and_then(|s| s.profile.color).map(|c| c.rgb());
         crate::title_bar::title_bar(
             h_flex()
                 .w_full()
@@ -584,6 +585,7 @@ impl Workspace {
                         .label("Command palette · Ctrl+K")
                         .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
                 ),
+            accent,
             window,
             cx,
         )
