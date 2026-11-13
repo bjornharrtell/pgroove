@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::window_corner_radii;
@@ -694,65 +694,72 @@ impl Workspace {
                 cx.notify();
             }));
         for (ix, kind) in self.tabs.iter().enumerate() {
-            bar = bar.child(match kind {
-                TabKind::Query(_, n) => Tab::new()
-                    .label(format!("Query {n}"))
-                    .prefix(
-                        div()
-                            .pl_3()
-                            .pr_1()
-                            .child(Icon::new(IconName::Code).size_4()),
-                    )
-                    .suffix(
-                        Button::new(("close", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(ix, cx)
-                            })),
-                    ),
-                TabKind::Activity(_, sid) => Tab::new()
-                    .label(match self.session(*sid) {
+            let ws = cx.entity();
+            let ws_mid = cx.entity();
+            let count = self.tabs.len();
+            let (icon, label) = match kind {
+                TabKind::Query(_, n) => (IconName::Code, format!("Query {n}")),
+                TabKind::Activity(_, sid) => (
+                    IconName::Activity,
+                    match self.session(*sid) {
                         Some(s) => format!("Activity · {}", s.label()),
                         None => "Activity".to_string(),
-                    })
-                    .prefix(
-                        div()
-                            .pl_3()
-                            .pr_1()
-                            .child(Icon::new(IconName::Activity).size_4()),
-                    )
-                    .suffix(
-                        Button::new(("close", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(ix, cx)
-                            })),
-                    ),
-                TabKind::Table(v, sid) => Tab::new()
-                    .label(self.tab_label(&v.read(cx).table().name, *sid))
-                    .prefix(
-                        div()
-                            .pl_3()
-                            .pr_1()
-                            .child(Icon::new(IconName::Table).size_4()),
-                    )
-                    .suffix(
-                        Button::new(("close", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(ix, cx)
-                            })),
-                    ),
-            });
+                    },
+                ),
+                TabKind::Table(v, sid) => (
+                    IconName::Table,
+                    self.tab_label(&v.read(cx).table().name, *sid),
+                ),
+            };
+            let tab = Tab::new()
+                .child(
+                    div()
+                        .id(("tab-ctx", ix))
+                        .flex()
+                        .items_center()
+                        .pl_3()
+                        .pr_1()
+                        .gap_1()
+                        .child(Icon::new(icon).size_4())
+                        .child(label)
+                        .context_menu(move |menu, _, _| {
+                            let (a, b, c, d) = (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                            menu.item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
+                                a.update(cx, |ws, cx| ws.close_tab(ix, cx))
+                            }))
+                            .item(
+                                PopupMenuItem::new("Close Others")
+                                    .disabled(count < 2)
+                                    .on_click(move |_, _, cx| {
+                                        b.update(cx, |ws, cx| ws.retain_tabs(|i| i == ix, cx))
+                                    }),
+                            )
+                            .item(PopupMenuItem::new("Close All").on_click(move |_, _, cx| {
+                                c.update(cx, |ws, cx| ws.retain_tabs(|_| false, cx))
+                            }))
+                            .item(
+                                PopupMenuItem::new("Close to the Right")
+                                    .disabled(ix + 1 >= count)
+                                    .on_click(move |_, _, cx| {
+                                        d.update(cx, |ws, cx| ws.retain_tabs(|i| i <= ix, cx))
+                                    }),
+                            )
+                        }),
+                )
+                .suffix(
+                    Button::new(("close", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::X)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(ix, cx)
+                        })),
+                )
+                .on_mouse_down(MouseButton::Middle, move |_, _, cx| {
+                    ws_mid.update(cx, |ws, cx| ws.close_tab(ix, cx))
+                });
+            bar = bar.child(tab);
         }
         bar.suffix(
             div().px_3().child(

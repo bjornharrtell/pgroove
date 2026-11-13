@@ -287,6 +287,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Closes every tab for which `keep` is false, like single close (no
+    /// unsaved-text prompt). Keeps the active tab if it survives, else the
+    /// nearest earlier survivor.
+    pub(crate) fn retain_tabs(&mut self, keep: impl Fn(usize) -> bool, cx: &mut Context<Self>) {
+        let active = self.active_tab;
+        let new_active = (0..=active)
+            .rev()
+            .find(|&i| keep(i))
+            .map(|i| (0..i).filter(|&j| keep(j)).count())
+            .or_else(|| (active..self.tabs.len()).find(|&i| keep(i)).map(|_| 0))
+            .unwrap_or(0);
+        let mut i = 0;
+        self.tabs.retain(|_| {
+            let k = keep(i);
+            i += 1;
+            k
+        });
+        self.active_tab = new_active.min(self.tabs.len().saturating_sub(1));
+        self.save_session(cx);
+        cx.notify();
+    }
+
     pub(crate) fn active_query(&self) -> Option<Entity<QueryTab>> {
         match self.tabs.get(self.active_tab) {
             Some(TabKind::Query(q, _)) => Some(q.clone()),
