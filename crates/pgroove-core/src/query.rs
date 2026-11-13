@@ -268,7 +268,28 @@ async fn run_one(
 ) -> Result<Vec<ResultSet>> {
     let mut sets = run_one_untyped(client, text, limit, char_start).await?;
     add_types(client, text, &mut sets).await;
+    for set in &mut sets {
+        decode_geometries(set);
+    }
     Ok(sets)
+}
+
+/// Rewrites the cells of geometry and geography columns from hex EWKB to EWKT. A cell that
+/// does not decode (cut short by the cell size limit, over the decode cap, or not EWKB)
+/// keeps the text the server sent.
+fn decode_geometries(set: &mut ResultSet) {
+    for (col, ty) in set.types.iter().enumerate() {
+        if !crate::wkb::is_geometry_type(ty) {
+            continue;
+        }
+        for row in &mut set.rows {
+            if let Some(Some(cell)) = row.get_mut(col)
+                && let Some(text) = crate::wkb::ewkb_hex_to_ewkt(cell)
+            {
+                *cell = clip_cell(&text);
+            }
+        }
+    }
 }
 
 /// Fills in the column types of a statement's single result set. The statement is parsed
@@ -358,6 +379,7 @@ pub fn export_statement(sql: &str) -> Result<String> {
 
 /// Streams a query's full result to a CSV file (with a header row) without holding it in
 /// memory. Returns the bytes written. The file is replaced only when the export succeeds.
+/// Geometry and geography columns are written as EWKT, as the grid shows them.
 pub async fn export_csv(client: &Client, statement: &str, dest: &std::path::Path) -> Result<u64> {
     use futures_util::StreamExt as _;
     use tokio::io::AsyncWriteExt as _;
@@ -365,6 +387,18 @@ pub async fn export_csv(client: &Client, statement: &str, dest: &std::path::Path
     part.push(".part");
     let part = std::path::PathBuf::from(part);
     let result: Result<u64> = async {
+        let statement = match client.prepare(statement).await {
+            Ok(stmt) => {
+                let columns: Vec<(String, String)> = stmt
+                    .columns()
+                    .iter()
+                    .map(|c| (c.name().to_string(), c.type_().name().to_string()))
+                    .collect();
+                export_with_ewkt(&columns, statement).unwrap_or_else(|| statement.to_string())
+            }
+            // The copy below reports the same error with its position.
+            Err(_) => statement.to_string(),
+        };
         let copy = format!("copy (\n{statement}\n) to stdout with (format csv, header true)");
         let stream = client
             .copy_out(copy.as_str())
@@ -392,6 +426,34 @@ pub async fn export_csv(client: &Client, statement: &str, dest: &std::path::Path
             Err(e)
         }
     }
+}
+
+/// Wraps `statement` so its geometry and geography columns come out as EWKT. `columns` are
+/// the statement's `(name, type)` pairs. `None` when there is no such column, so the
+/// statement runs as written. Columns are renamed by position inside, so a result with
+/// repeated names still works, and given back their own names outside.
+fn export_with_ewkt(columns: &[(String, String)], statement: &str) -> Option<String> {
+    if !columns.iter().any(|(_, t)| crate::wkb::is_geometry_type(t)) {
+        return None;
+    }
+    let inner: Vec<String> = (0..columns.len()).map(|i| format!("c{i}")).collect();
+    let outer: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ty))| {
+            let value = if crate::wkb::is_geometry_type(ty) {
+                format!("st_asewkt(c{i})")
+            } else {
+                format!("c{i}")
+            };
+            format!("{value} as {}", crate::data::quote_ident(name))
+        })
+        .collect();
+    Some(format!(
+        "select {} from (\n{statement}\n) as _pgroove_x({})",
+        outer.join(", "),
+        inner.join(", ")
+    ))
 }
 
 /// Asks the server to cancel the running query on this client.
@@ -585,6 +647,158 @@ mod tests {
         assert_eq!(qe.span_in("select * from nope"), Some(14..18));
         client.simple_query("select 1").await.unwrap();
         cancel(&client).await.unwrap();
+    }
+
+    /// Needs `PGROOVE_TEST_PG` and PostGIS (skips without either).
+    #[tokio::test]
+    async fn geometry_matches_postgis_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        if client
+            .batch_execute("create extension if not exists postgis")
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let wkts = [
+            "POINT(1 2)",
+            "POINT(-122.4194 37.7749)",
+            "POINT Z (1 2 3)",
+            "POINTM(1 2 3)",
+            "POINT ZM (1 2 3 4)",
+            "LINESTRING Z (0 0 1,1 1 1)",
+            "LINESTRING M (0 0 1,1 1 1)",
+            "POLYGON ZM ((0 0 1 2,1 0 1 2,1 1 1 2,0 0 1 2))",
+            "MULTIPOINT Z ((0 0 1),(1 1 1))",
+            "MULTIPOINT M ((0 0 1))",
+            "MULTIPOINT((0 0),EMPTY)",
+            "MULTIPOINT EMPTY",
+            "MULTILINESTRING EMPTY",
+            "MULTIPOLYGON EMPTY",
+            "POINT Z EMPTY",
+            "LINESTRING M EMPTY",
+            "GEOMETRYCOLLECTION M (POINT M (1 2 3))",
+            "GEOMETRYCOLLECTION(POINT EMPTY,LINESTRING EMPTY)",
+            "POINT(0.1 1e-7)",
+            "POINT(1234567890123 0.000123)",
+            "POINT EMPTY",
+            "LINESTRING(0 0,1 1,2 0.5)",
+            "LINESTRING EMPTY",
+            "POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,2 2,1 1))",
+            "POLYGON EMPTY",
+            "MULTIPOINT((0 0),(1 2))",
+            "MULTILINESTRING((0 0,1 1),(2 2,3 3))",
+            "MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((5 5,6 5,6 6,5 5)))",
+            "GEOMETRYCOLLECTION(POINT(5 6),LINESTRING(0 0,1 1))",
+            "GEOMETRYCOLLECTION EMPTY",
+            "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION(POINT(1 1)))",
+            "SRID=4326;POINT(1 2)",
+            "SRID=3857;POLYGON Z ((0 0 1,4 0 1,4 4 1,0 0 1))",
+        ];
+        for wkt in wkts {
+            for cast in ["geometry", "geography"] {
+                // Geography has no Z, M, or collections nested in this way, and no SRID other
+                // than a geographic one; the server says so, and the case is skipped.
+                let sql = format!("select ('{wkt}')::{cast}, st_asewkt(('{wkt}')::{cast})::text");
+                let Ok(o) = run(&client, &sql, 10).await else {
+                    assert_eq!(cast, "geography", "{wkt} must be valid geometry");
+                    continue;
+                };
+                let set = &o.sets[0];
+                assert_eq!(set.types[0], cast, "{wkt}");
+                let row = &set.rows[0];
+                assert_eq!(row[0], row[1], "{cast} {wkt}");
+            }
+        }
+    }
+
+    /// Needs `PGROOVE_TEST_PG` and PostGIS (skips without either).
+    #[tokio::test]
+    async fn geometry_export_is_ewkt_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        if client
+            .batch_execute("create extension if not exists postgis")
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("g.csv");
+        export_csv(
+            &client,
+            "select 1 as id, 'SRID=4326;POINT(1 2)'::geometry as g, 'x' as id",
+            &dest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "id,g,id\n1,SRID=4326;POINT(1 2),x\n"
+        );
+    }
+
+    #[test]
+    fn export_wraps_only_geometry_queries() {
+        let col = |n: &str, t: &str| (n.to_string(), t.to_string());
+        assert_eq!(
+            export_with_ewkt(&[col("id", "int4"), col("t", "text")], "select 1"),
+            None
+        );
+        assert_eq!(
+            export_with_ewkt(
+                &[
+                    col("id", "int4"),
+                    col("a b", "geometry"),
+                    col("id", "geography")
+                ],
+                "select * from t"
+            )
+            .unwrap(),
+            "select c0 as \"id\", st_asewkt(c1) as \"a b\", st_asewkt(c2) as \"id\" from (\n\
+             select * from t\n) as _pgroove_x(c0, c1, c2)"
+        );
+    }
+
+    #[test]
+    fn geometry_cells_become_ewkt() {
+        let mut set = ResultSet {
+            columns: vec!["id".into(), "g".into(), "t".into()],
+            types: vec!["int4".into(), "geometry".into(), "text".into()],
+            rows: vec![
+                vec![
+                    Some("1".into()),
+                    Some("0101000020E6100000000000000000F03F0000000000000040".into()),
+                    // Not a geometry column, so left as it is even though it decodes.
+                    Some("0101000000000000000000F03F0000000000000040".into()),
+                ],
+                vec![Some("2".into()), None, None],
+                vec![Some("3".into()), Some("not ewkb".into()), None],
+            ],
+            ..Default::default()
+        };
+        decode_geometries(&mut set);
+        assert_eq!(set.rows[0][1].as_deref(), Some("SRID=4326;POINT(1 2)"));
+        assert_eq!(
+            set.rows[0][2].as_deref(),
+            Some("0101000000000000000000F03F0000000000000040")
+        );
+        assert_eq!(set.rows[1][1], None, "NULL stays NULL");
+        assert_eq!(set.rows[2][1].as_deref(), Some("not ewkb"));
+        // Without types nothing is decoded.
+        let mut plain = ResultSet {
+            columns: vec!["g".into()],
+            rows: vec![vec![Some(
+                "0101000000000000000000F03F0000000000000040".into(),
+            )]],
+            ..Default::default()
+        };
+        decode_geometries(&mut plain);
+        assert!(plain.rows[0][0].as_deref().unwrap().starts_with("0101"));
     }
 
     #[test]

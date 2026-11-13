@@ -25,6 +25,7 @@ pub mod sqlsplit;
 pub mod store;
 pub mod structure;
 pub mod update;
+pub mod wkb;
 
 pub use profile::{ConnectionProfile, ProfileColor, SslMode};
 pub use store::ProfileStore;
