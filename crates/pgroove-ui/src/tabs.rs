@@ -19,6 +19,21 @@ pub(crate) enum TabKind {
 }
 
 impl Workspace {
+    /// The interface or grid size changed (settings already updated): saves it, applies it to
+    /// the theme at once, and has every open grid rebuild its columns.
+    pub(crate) fn scales_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_settings();
+        crate::theme::apply(&self.settings, Some(window), cx);
+        for tab in &self.tabs {
+            match tab {
+                TabKind::Query(q, _) => q.update(cx, |q, cx| q.rescale(cx)),
+                TabKind::Table(t, _) => t.update(cx, |t, cx| t.rescale(cx)),
+                TabKind::Activity(..) => {}
+            }
+        }
+        cx.notify();
+    }
+
     /// The query tab to use for inserted text: the active one, else any, else a new one.
     pub(crate) fn query_tab(
         &mut self,

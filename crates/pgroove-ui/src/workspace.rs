@@ -543,7 +543,7 @@ impl Workspace {
                     h_flex()
                         .gap_1p5()
                         .px_2()
-                        .h(px(26.))
+                        .h(crate::theme::ui_px(26., cx))
                         .items_center()
                         .rounded(theme.radius)
                         .border_1()
@@ -639,7 +639,7 @@ impl Workspace {
         let (this, view) = (cx.entity(), view.clone());
         h_flex()
             .px_3()
-            .h(px(32.))
+            .h(crate::theme::ui_px(32., cx))
             .gap_2()
             .items_center()
             .border_b_1()

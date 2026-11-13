@@ -34,8 +34,18 @@ pub fn step_cursor(current: Option<usize>, len: usize, delta: isize) -> Option<u
     })
 }
 
-/// Height of every sidebar row; the virtualized list needs them all to be the same.
+/// Height of every sidebar row at the normal interface size; the virtualized list needs them
+/// all to be the same.
 const ROW_HEIGHT: f32 = 28.;
+
+/// The row height at the interface size in force, so the tree gets denser or looser with the
+/// text instead of clipping it.
+fn row_height(cx: &App) -> Pixels {
+    px(pgroove_core::settings::scaled(
+        ROW_HEIGHT,
+        crate::theme::ui_scale(cx),
+    ))
+}
 
 /// Left padding of the first tree level and the extra indent per level.
 const TREE_BASE: f32 = 10.;
@@ -106,7 +116,7 @@ impl Workspace {
             .gap_1p5()
             .pl(px(left))
             .pr_2()
-            .h(px(ROW_HEIGHT))
+            .h(row_height(cx))
             .flex_shrink_0()
             .items_center()
             .text_sm()
@@ -364,7 +374,7 @@ impl Workspace {
                 .into_any_element(),
             Row::Message(m) => div()
                 .pl(px(leaf_indent(3)))
-                .h(px(ROW_HEIGHT))
+                .h(row_height(cx))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -708,7 +718,7 @@ impl Workspace {
         // The list assumes every row is the same height, so the header keeps that height; a
         // full-width tinted strip sets it apart.
         div()
-            .h(px(ROW_HEIGHT))
+            .h(row_height(cx))
             .flex_shrink_0()
             .child(
                 h_flex()
@@ -779,7 +789,7 @@ impl Workspace {
                             }
                             SidebarItem::Note(m) => div()
                                 .pl(px(leaf_indent(2)))
-                                .h(px(ROW_HEIGHT))
+                                .h(row_height(cx))
                                 .flex_shrink_0()
                                 .flex()
                                 .items_center()
@@ -800,7 +810,7 @@ impl Workspace {
                         let is_cursor = focused && this.cursor == Some(ix);
                         div()
                             .w_full()
-                            .h(px(ROW_HEIGHT))
+                            .h(row_height(cx))
                             .flex_shrink_0()
                             .border_l_2()
                             .border_color(if is_cursor {
@@ -851,7 +861,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .px_3()
-                    .h(px(32.))
+                    .h(crate::theme::ui_px(32., cx))
                     .justify_between()
                     .items_center()
                     .child(

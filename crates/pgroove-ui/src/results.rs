@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::edit::{EditSession, InsertValue};
 use pgroove_core::query::ResultSet;
+use pgroove_core::settings::scaled;
 
 use crate::selection::{CellSelection, Marking, Mods};
 
@@ -37,6 +38,29 @@ pub const GUTTER: usize = 1;
 fn gutter_width(rows: usize) -> f32 {
     let digits = rows.max(1).to_string().len() as f32;
     (digits * 8.0 + 24.0).max(44.0)
+}
+
+/// The kit's own table text size (`text_sm`, 14 px), which the grid size scales. Setting it
+/// explicitly is needed because the kit sets none for a custom row height. In pixels, not
+/// rems: the grid size is its own, so text, rows and columns all follow the one setting.
+const CELL_TEXT: f32 = 14.;
+
+/// Row height of the kit's medium table row, which the grid size scales.
+pub const ROW_HEIGHT: f32 = 32.;
+
+/// The cell text size at `percent` of normal, in pixels.
+pub fn cell_text(percent: u32) -> f32 {
+    scaled(CELL_TEXT, percent)
+}
+
+/// The row height of the grid at `percent` of normal, in pixels.
+fn row_px(percent: u32) -> f32 {
+    scaled(ROW_HEIGHT, percent)
+}
+
+/// The row height of the grid at the size in force.
+pub fn row_height(cx: &App) -> Pixels {
+    px(row_px(crate::theme::grid_scale(cx)))
 }
 
 /// Where a jump key sends the selection.
@@ -330,11 +354,15 @@ impl TableDelegate for ResultsTable {
         self.row_total()
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         match col_ix.checked_sub(GUTTER) {
-            Some(i) => self.columns[i].clone(),
+            Some(i) => {
+                let mut column = self.columns[i].clone();
+                column.width = px(scaled(column.width.as_f32(), crate::theme::grid_scale(cx)));
+                column
+            }
             None => Column::new("row-numbers", "")
-                .width(px(self.gutter))
+                .width(px(scaled(self.gutter, crate::theme::grid_scale(cx))))
                 .fixed_left()
                 .resizable(false)
                 .movable(false)
@@ -661,6 +689,28 @@ mod tests {
         assert_eq!(t.cell(1, 1), None);
         assert_eq!(t.cell(1, 0), Some("2"));
         assert_eq!(t.row_total(), 2);
+    }
+
+    #[test]
+    fn rows_and_columns_scale_with_the_grid_size() {
+        assert_eq!(super::row_px(100), 32.);
+        assert_eq!(super::row_px(125), 40.);
+        assert_eq!(super::row_px(75), 24.);
+        assert_eq!(super::row_px(0), 24., "clamped");
+        // Column widths and the gutter use the same rounding, so they stay whole pixels.
+        assert_eq!(pgroove_core::settings::scaled(360., 125), 450.);
+        assert_eq!(pgroove_core::settings::scaled(80., 75), 60.);
+        assert_eq!(pgroove_core::settings::scaled(44., 125), 55.);
+    }
+
+    #[test]
+    fn cell_text_scales_with_the_grid_size() {
+        assert_eq!(super::cell_text(100), 14.);
+        assert_eq!(super::cell_text(125), 18.);
+        assert_eq!(super::cell_text(75), 11.);
+        // A stray value is held to the allowed range.
+        assert_eq!(super::cell_text(1), super::cell_text(75));
+        assert_eq!(super::cell_text(9999), super::cell_text(125));
     }
 
     #[test]

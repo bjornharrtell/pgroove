@@ -78,6 +78,11 @@ pub struct AllowEditing;
 impl EventEmitter<AllowEditing> for TableView {}
 
 impl TableView {
+    /// The grid size changed: the result grid rebuilds its columns.
+    pub(crate) fn rescale(&mut self, cx: &mut Context<Self>) {
+        self.pane.update(cx, |p, cx| p.rescale(cx));
+    }
+
     pub fn new(
         table: TableRef,
         client: Arc<pgroove_core::Client>,
@@ -368,7 +373,7 @@ impl TableView {
         let bar = h_flex()
             .gap_2()
             .px_3()
-            .h(px(32.))
+            .h(crate::theme::ui_px(32., cx))
             .items_center()
             .border_b_1()
             .border_color(theme.border)
@@ -725,7 +730,7 @@ impl Render for TableView {
         let mode_bar = h_flex()
             .gap_1()
             .px_3()
-            .h(px(32.))
+            .h(crate::theme::ui_px(32., cx))
             .items_center()
             .border_b_1()
             .border_color(theme.border)
@@ -779,7 +784,7 @@ impl Render for TableView {
                 h_flex()
                     .gap_2()
                     .px_3()
-                    .h(px(38.))
+                    .h(crate::theme::ui_px(38., cx))
                     .items_center()
                     .border_b_1()
                     .border_color(theme.border)

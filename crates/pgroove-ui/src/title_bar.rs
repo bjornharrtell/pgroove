@@ -117,7 +117,7 @@ pub fn title_bar(
     h_flex()
         .id("title-bar")
         .flex_shrink_0()
-        .h(px(HEIGHT))
+        .h(crate::theme::ui_px(HEIGHT, cx))
         .items_center()
         .rounded_tl(radii.top_left)
         .rounded_tr(radii.top_right)

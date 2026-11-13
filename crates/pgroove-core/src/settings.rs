@@ -50,6 +50,36 @@ pub fn clamp_row_limit(n: u32) -> u32 {
     n.clamp(1, MAX_ROW_LIMIT)
 }
 
+/// Smallest and largest interface or grid size, in percent of the normal size.
+pub const MIN_SCALE: u32 = 75;
+pub const MAX_SCALE: u32 = 125;
+/// What the size stepper changes by, in percent.
+pub const SCALE_STEP: u32 = 5;
+/// The normal size.
+pub const DEFAULT_SCALE: u32 = 100;
+
+/// Keeps a size within `MIN_SCALE..=MAX_SCALE` and on a multiple of the step, so a hand-edited
+/// settings file cannot ask for an unreadable or absurd size.
+pub fn clamp_scale(percent: u32) -> u32 {
+    let stepped = percent.saturating_add(SCALE_STEP / 2) / SCALE_STEP * SCALE_STEP;
+    stepped.clamp(MIN_SCALE, MAX_SCALE)
+}
+
+/// The size one step larger (`up`) or smaller, held at the limits.
+pub fn step_scale(percent: u32, up: bool) -> u32 {
+    let now = clamp_scale(percent);
+    if up {
+        (now + SCALE_STEP).min(MAX_SCALE)
+    } else {
+        now.saturating_sub(SCALE_STEP).max(MIN_SCALE)
+    }
+}
+
+/// A length in pixels at `percent` of its normal size, to the nearest whole pixel.
+pub fn scaled(px: f32, percent: u32) -> f32 {
+    (px * clamp_scale(percent) as f32 / 100.).round()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Look for a newer release when the app starts.
@@ -75,6 +105,17 @@ pub struct Settings {
     /// Write the keywords of generated SQL (Generate SQL in the object tree) in upper case.
     #[serde(default)]
     pub uppercase_generated_sql: bool,
+    /// Size of the interface text and its row heights, in percent (75 to 125).
+    #[serde(default = "default_scale")]
+    pub ui_scale: u32,
+    /// Size of the result grid's text, rows and columns, in percent (75 to 125), separate
+    /// from the interface size.
+    #[serde(default = "default_scale")]
+    pub grid_scale: u32,
+}
+
+fn default_scale() -> u32 {
+    DEFAULT_SCALE
 }
 
 fn default_light() -> String {
@@ -104,6 +145,8 @@ impl Default for Settings {
             dark_theme: default_dark(),
             dbeaver_import_offered: false,
             uppercase_generated_sql: false,
+            ui_scale: DEFAULT_SCALE,
+            grid_scale: DEFAULT_SCALE,
         }
     }
 }
@@ -134,6 +177,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scales_are_clamped_stepped_and_applied() {
+        assert_eq!(clamp_scale(0), MIN_SCALE);
+        assert_eq!(clamp_scale(74), MIN_SCALE);
+        assert_eq!(clamp_scale(100), 100);
+        assert_eq!(clamp_scale(102), 100, "off the step rounds to it");
+        assert_eq!(clamp_scale(103), 105);
+        assert_eq!(clamp_scale(500), MAX_SCALE);
+        assert_eq!(clamp_scale(u32::MAX), MAX_SCALE);
+        assert_eq!(step_scale(100, true), 105);
+        assert_eq!(step_scale(100, false), 95);
+        assert_eq!(step_scale(MAX_SCALE, true), MAX_SCALE);
+        assert_eq!(step_scale(MIN_SCALE, false), MIN_SCALE);
+        assert_eq!(
+            step_scale(1000, false),
+            120,
+            "a stray value is clamped first"
+        );
+        // Every size reachable from the default by steps is on the grid and in range.
+        let mut s = DEFAULT_SCALE;
+        for _ in 0..20 {
+            s = step_scale(s, true);
+        }
+        assert_eq!(s, MAX_SCALE);
+        for _ in 0..20 {
+            s = step_scale(s, false);
+        }
+        assert_eq!(s, MIN_SCALE);
+        assert_eq!(scaled(28., 100), 28.);
+        assert_eq!(scaled(28., 75), 21.);
+        assert_eq!(scaled(28., 125), 35.);
+        assert_eq!(scaled(28., 10), 21., "clamped before scaling");
+    }
+
+    #[test]
     fn row_limits_are_clamped() {
         assert_eq!(clamp_row_limit(0), 1);
         assert_eq!(clamp_row_limit(200), 200);
@@ -160,6 +237,8 @@ mod tests {
             dark_theme: "Catppuccin Frappe".into(),
             dbeaver_import_offered: true,
             uppercase_generated_sql: true,
+            ui_scale: 90,
+            grid_scale: 125,
         };
         off.save(&path).unwrap();
         assert_eq!(Settings::load(&path), off);
@@ -168,6 +247,8 @@ mod tests {
             Settings::load(&path).check_for_updates,
             "missing key defaults to on"
         );
+        assert_eq!(Settings::load(&path).ui_scale, 100);
+        assert_eq!(Settings::load(&path).grid_scale, 100);
         std::fs::write(&path, "check_for_updates = 3").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
         let _ = Settings::default_path();

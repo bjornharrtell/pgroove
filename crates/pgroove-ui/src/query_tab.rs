@@ -128,6 +128,11 @@ pub fn format_limit(n: u32) -> String {
 }
 
 impl QueryTab {
+    /// The grid size changed: the result grid rebuilds its columns.
+    pub(crate) fn rescale(&mut self, cx: &mut Context<Self>) {
+        self.results.update(cx, |p, cx| p.rescale(cx));
+    }
+
     pub fn new(
         runtime: Arc<Runtime>,
         completions: SharedIndex,
@@ -766,7 +771,7 @@ impl QueryTab {
         h_flex()
             .gap_4()
             .px_3()
-            .h(px(34.))
+            .h(crate::theme::ui_px(34., cx))
             .items_center()
             .text_xs()
             .border_b_1()
@@ -809,7 +814,7 @@ impl QueryTab {
                 h_flex()
                     .gap_3()
                     .px_3()
-                    .h(px(30.))
+                    .h(crate::theme::ui_px(30., cx))
                     .items_center()
                     .flex_shrink_0()
                     .text_xs()
@@ -858,7 +863,7 @@ impl Render for QueryTab {
             h_flex()
                 .gap_2()
                 .px_3()
-                .h(px(34.))
+                .h(crate::theme::ui_px(34., cx))
                 .items_center()
                 .border_b_1()
                 .border_color(theme.border)

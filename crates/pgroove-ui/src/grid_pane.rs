@@ -234,6 +234,12 @@ impl GridPane {
         }
     }
 
+    /// Re-reads the grid size: the kit caches column widths, so they are rebuilt.
+    pub fn rescale(&mut self, cx: &mut Context<Self>) {
+        self.grid.update(cx, |g, cx| g.refresh(cx));
+        cx.notify();
+    }
+
     /// Installs (or clears) the staged-edit session for the shown data.
     pub fn set_session(&mut self, session: Option<EditSession>, cx: &mut Context<Self>) {
         self.grid.update(cx, |g, cx| {
@@ -350,7 +356,7 @@ impl GridPane {
                 .child(
                     h_flex()
                         .px_3()
-                        .h(px(26.))
+                        .h(crate::theme::ui_px(26., cx))
                         .items_center()
                         .gap_2()
                         .text_xs()
@@ -464,9 +470,15 @@ impl Render for GridPane {
         let on_row_start =
             cx.listener(|this, _: &JumpRowStart, _, cx| this.jump(Jump::RowStart, cx));
         let on_row_end = cx.listener(|this, _: &JumpRowEnd, _, cx| this.jump(Jump::RowEnd, cx));
+        // The grid's size: the kit takes a row height, and the text follows through the
+        // pixel text size of this subtree, so a changed size shows at once.
+        let percent = crate::theme::grid_scale(cx);
+        let row_height = crate::results::row_height(cx);
         let inspector = self.render_inspector(cx);
         let show_inspector = inspector.is_some();
         let grid = self.grid.clone();
+        let table =
+            DataTable::new(&self.grid).with_size(gpui_kit::component::Size::Size(row_height));
         div()
             .size_full()
             .key_context("ResultGrid")
@@ -486,7 +498,14 @@ impl Render for GridPane {
             .child(
                 v_resizable("grid-split")
                     .with_state(&self.split)
-                    .child(resizable_panel().child(DataTable::new(&self.grid)))
+                    .child(
+                        resizable_panel().child(
+                            div()
+                                .size_full()
+                                .text_size(px(crate::results::cell_text(percent)))
+                                .child(table),
+                        ),
+                    )
                     .child(
                         resizable_panel()
                             .size(px(160.))

@@ -14,6 +14,13 @@ impl Workspace {
     /// Runs a palette command; query commands act on the active (or a new) query tab.
     fn run_command(&mut self, cmd: PaletteCommand, window: &mut Window, cx: &mut Context<Self>) {
         use PaletteCommand::*;
+        if let Some((ui, grid)) =
+            palette::resized(&cmd, self.settings.ui_scale, self.settings.grid_scale)
+        {
+            self.settings.ui_scale = ui;
+            self.settings.grid_scale = grid;
+            return self.scales_changed(window, cx);
+        }
         match cmd {
             NewQuery => {
                 self.new_query(window, cx);
@@ -90,6 +97,8 @@ impl Workspace {
             InstallUpdate => self.open_update_dialog(window, cx),
             ToggleUpdateChecks => self.toggle_update_checks(cx),
             ToggleUppercaseSql => self.toggle_uppercase_sql(cx),
+            // Handled above.
+            StepUiScale(_) | ResetUiScale | StepGridScale(_) | ResetGridScale => {}
         }
     }
 
@@ -108,6 +117,8 @@ impl Workspace {
                 update_available: matches!(self.update, UpdateState::Available(_)),
                 auto_check_updates: self.settings.check_for_updates,
                 uppercase_generated_sql: self.settings.uppercase_generated_sql,
+                ui_scale: self.settings.ui_scale,
+                grid_scale: self.settings.grid_scale,
                 appearance: self.settings.appearance,
                 light_theme: self.settings.light_theme.clone(),
                 dark_theme: self.settings.dark_theme.clone(),
