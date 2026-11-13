@@ -14,13 +14,14 @@ use gpui_kit::*;
 use pgroove_core::explain::Plan;
 use pgroove_core::history::{self, History, HistoryEntry, Snippets};
 use pgroove_core::query::{self, QueryError, QueryOutput};
+use pgroove_core::sqlsplit::RunScope;
 use pgroove_core::structure::format_bytes;
 use tokio::runtime::Runtime;
 
 use crate::grid_pane::GridPane;
 use crate::sql_completion::{SharedIndex, SqlCompletions};
 
-actions!(query_tab, [RunQuery, CancelQuery, FormatSql]);
+actions!(query_tab, [RunQuery, RunScript, CancelQuery, FormatSql]);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RunState {
@@ -240,16 +241,11 @@ impl QueryTab {
             .update(cx, |e, cx| e.set_value(joined, window, cx));
     }
 
-    /// The selection, or the whole text, with the byte offset where it starts.
-    fn sql_to_run(&self, cx: &App) -> (String, usize) {
+    /// The selection, else what `scope` says (the statement at the cursor, or the whole text),
+    /// with the byte offset where it starts.
+    fn sql_to_run(&self, scope: RunScope, cx: &App) -> (String, usize) {
         let e = self.editor.read(cx);
-        let sel = e.selected_range();
-        let selected = e.selected_text().to_string();
-        if selected.trim().is_empty() {
-            (e.value().to_string(), 0)
-        } else {
-            (selected, sel.start)
-        }
+        pgroove_core::sqlsplit::sql_to_run(&e.value(), e.selected_range(), scope)
     }
 
     fn clear_diagnostics(&mut self, cx: &mut Context<Self>) {
@@ -298,14 +294,24 @@ impl QueryTab {
         cx.notify();
     }
 
+    /// Run: the selection, else the statement at the cursor.
     pub(crate) fn run_query(&mut self, cx: &mut Context<Self>) {
+        self.run_scope(RunScope::Statement, cx);
+    }
+
+    /// Run script: the selection, else the whole text.
+    pub(crate) fn run_script(&mut self, cx: &mut Context<Self>) {
+        self.run_scope(RunScope::Script, cx);
+    }
+
+    fn run_scope(&mut self, scope: RunScope, cx: &mut Context<Self>) {
         if self.run == RunState::Running {
             return;
         }
         let Some(client) = self.client.clone() else {
             return self.not_connected(cx);
         };
-        let (sql, base) = self.sql_to_run(cx);
+        let (sql, base) = self.sql_to_run(scope, cx);
         if sql.trim().is_empty() {
             return;
         }
@@ -366,7 +372,7 @@ impl QueryTab {
         let Some(client) = self.client.clone() else {
             return self.not_connected(cx);
         };
-        let (sql, _) = self.sql_to_run(cx);
+        let (sql, _) = self.sql_to_run(RunScope::Statement, cx);
         let statement = match query::export_statement(&sql) {
             Ok(s) => s,
             Err(e) => {
@@ -462,7 +468,7 @@ impl QueryTab {
         let Some(client) = self.client.clone() else {
             return self.not_connected(cx);
         };
-        let (sql, _) = self.sql_to_run(cx);
+        let (sql, _) = self.sql_to_run(RunScope::Statement, cx);
         self.run = RunState::Running;
         cx.notify();
         let run_sql = sql.clone();
@@ -867,6 +873,7 @@ impl Render for QueryTab {
             .size_full()
             .key_context("QueryTab")
             .on_action(cx.listener(|this, _: &RunQuery, _, cx| this.run_query(cx)))
+            .on_action(cx.listener(|this, _: &RunScript, _, cx| this.run_script(cx)))
             .on_action(cx.listener(|this, _: &CancelQuery, _, cx| this.cancel_query(cx)))
             .on_action(cx.listener(|this, _: &FormatSql, window, cx| this.format_sql(window, cx)))
             .child(
@@ -878,9 +885,19 @@ impl Render for QueryTab {
                             .xsmall()
                             .icon(IconName::Play)
                             .label("Run")
-                            .tooltip("Run (Ctrl+Enter)")
+                            .tooltip(
+                                "Run the selection, or the statement at the cursor (Ctrl+Enter)",
+                            )
                             .loading(self.run == RunState::Running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_query(cx))),
+                    )
+                    .child(
+                        Button::new("run-script")
+                            .outline()
+                            .xsmall()
+                            .label("Run script")
+                            .tooltip("Run the selection, or the whole script (Alt+X)")
+                            .on_click(cx.listener(|this, _, _, cx| this.run_script(cx))),
                     )
                     .child(
                         Button::new("explain")

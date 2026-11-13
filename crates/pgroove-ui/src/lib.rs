@@ -30,7 +30,7 @@ pub use workspace::Workspace;
 
 use gpui_kit::{App, KeyBinding};
 
-pub use query_tab::{CancelQuery, FormatSql, RunQuery};
+pub use query_tab::{CancelQuery, FormatSql, RunQuery, RunScript};
 pub use sidebar::step_cursor;
 pub use workspace::{OpenPalette, Startup, ToggleFullscreen};
 
@@ -38,6 +38,7 @@ pub use workspace::{OpenPalette, Startup, ToggleFullscreen};
 fn action_for(name: &str) -> Option<(Box<dyn gpui_kit::Action>, Option<&'static str>)> {
     Some(match name {
         "run_query" => (Box::new(RunQuery), None),
+        "run_script" => (Box::new(RunScript), None),
         "cancel_query" => (Box::new(CancelQuery), Some("QueryTab")),
         "format_sql" => (Box::new(FormatSql), None),
         "open_palette" => (Box::new(OpenPalette), None),

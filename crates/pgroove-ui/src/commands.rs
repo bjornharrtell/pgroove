@@ -17,12 +17,14 @@ impl Workspace {
             NewQuery => {
                 self.new_query(window, cx);
             }
-            RunQuery | ExplainQuery | AnalyzeQuery | FormatSql | ShowHistory | ShowSnippets => {
+            RunQuery | RunScript | ExplainQuery | AnalyzeQuery | FormatSql | ShowHistory
+            | ShowSnippets => {
                 let tab = self
                     .active_query()
                     .unwrap_or_else(|| self.query_tab(window, cx));
                 tab.update(cx, |t, cx| match cmd {
                     RunQuery => t.run_query(cx),
+                    RunScript => t.run_script(cx),
                     ExplainQuery => t.explain(false, cx),
                     AnalyzeQuery => t.explain(true, cx),
                     FormatSql => t.format_sql(window, cx),

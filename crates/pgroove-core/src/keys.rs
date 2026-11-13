@@ -9,6 +9,7 @@ use serde::Deserialize;
 /// Command names and their default keystrokes.
 pub const DEFAULTS: &[(&str, &[&str])] = &[
     ("run_query", &["ctrl-enter", "cmd-enter"]),
+    ("run_script", &["alt-x"]),
     ("cancel_query", &["escape"]),
     ("format_sql", &["ctrl-shift-f"]),
     ("open_palette", &["ctrl-k", "cmd-k"]),
@@ -85,7 +86,8 @@ mod tests {
         assert!(unknown.is_empty());
         assert!(b.contains(&("run_query".into(), "ctrl-enter".into())));
         assert!(b.contains(&("open_palette".into(), "cmd-k".into())));
-        assert_eq!(b.len(), 8);
+        assert_eq!(b.len(), 9);
+        assert!(b.contains(&("run_script".into(), "alt-x".into())));
         assert!(b.contains(&("toggle_fullscreen".into(), "f11".into())));
     }
 

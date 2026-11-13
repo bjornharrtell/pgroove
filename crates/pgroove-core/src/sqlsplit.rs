@@ -9,6 +9,44 @@ pub struct Statement {
     pub start: usize,
 }
 
+/// What a run command covers when nothing is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunScope {
+    /// The statement under the cursor (Run).
+    Statement,
+    /// The whole text (Run script).
+    Script,
+}
+
+/// The statement the cursor is in: the last one that starts at or before it, so a cursor in
+/// the blank space after a statement (or right after its semicolon) still means that
+/// statement; before the first statement it means the first.
+pub fn statement_at(sql: &str, cursor: usize) -> Option<Statement> {
+    let all = split_statements(sql);
+    let ix = all.iter().rposition(|s| s.start <= cursor).unwrap_or(0);
+    all.into_iter().nth(ix)
+}
+
+/// The SQL a run command sends and the byte offset where it starts in the text: the selection
+/// when there is one, else what `scope` says. `selection` is the editor's selected byte range
+/// (empty when only a cursor).
+pub fn sql_to_run(
+    text: &str,
+    selection: std::ops::Range<usize>,
+    scope: RunScope,
+) -> (String, usize) {
+    let selected = text.get(selection.clone()).unwrap_or("");
+    if !selected.trim().is_empty() {
+        return (selected.to_string(), selection.start);
+    }
+    if scope == RunScope::Statement
+        && let Some(s) = statement_at(text, selection.start)
+    {
+        return (s.text, s.start);
+    }
+    (text.to_string(), 0)
+}
+
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
 }
@@ -167,6 +205,74 @@ mod tests {
 
     fn texts(sql: &str) -> Vec<String> {
         split_statements(sql).into_iter().map(|s| s.text).collect()
+    }
+
+    const SCRIPT: &str = "select 1;\n\nselect 2 from t;\nselect 3";
+
+    fn at(cursor: usize) -> String {
+        statement_at(SCRIPT, cursor).unwrap().text
+    }
+
+    #[test]
+    fn cursor_picks_its_statement() {
+        assert_eq!(at(0), "select 1");
+        assert_eq!(at(5), "select 1");
+        assert_eq!(at(8), "select 1", "just before the semicolon");
+        assert_eq!(at(9), "select 1", "right after the semicolon");
+        assert_eq!(at(10), "select 1", "blank line after a statement");
+        let second = SCRIPT.find("select 2").unwrap();
+        assert_eq!(at(second), "select 2 from t");
+        assert_eq!(at(second + 12), "select 2 from t");
+        let third = SCRIPT.find("select 3").unwrap();
+        assert_eq!(
+            at(third - 1),
+            "select 2 from t",
+            "the newline before the next statement"
+        );
+        assert_eq!(at(third), "select 3");
+        assert_eq!(at(SCRIPT.len()), "select 3", "end of text");
+        assert_eq!(at(10_000), "select 3", "past the end");
+    }
+
+    #[test]
+    fn cursor_before_the_first_statement_means_the_first() {
+        let sql = "  \n  select 1; select 2";
+        assert_eq!(statement_at(sql, 0).unwrap().text, "select 1");
+        assert_eq!(statement_at("", 0), None);
+        assert_eq!(statement_at(" ; -- note", 3), None);
+    }
+
+    #[test]
+    fn cursor_ignores_semicolons_in_strings() {
+        let sql = "select 'a;b'; select 2";
+        assert_eq!(statement_at(sql, 9).unwrap().text, "select 'a;b'");
+        assert_eq!(statement_at(sql, 16).unwrap().text, "select 2");
+    }
+
+    #[test]
+    fn selection_wins_over_scope() {
+        for scope in [RunScope::Statement, RunScope::Script] {
+            let (sql, base) = sql_to_run(SCRIPT, 3..8, scope);
+            assert_eq!((sql.as_str(), base), ("ect 1", 3));
+        }
+        // A selection of only blanks counts as no selection.
+        let (sql, base) = sql_to_run(SCRIPT, 9..11, RunScope::Script);
+        assert_eq!((sql.as_str(), base), (SCRIPT, 0));
+    }
+
+    #[test]
+    fn scope_decides_without_a_selection() {
+        let second = SCRIPT.find("select 2").unwrap();
+        let (sql, base) = sql_to_run(SCRIPT, second + 3..second + 3, RunScope::Statement);
+        assert_eq!((sql.as_str(), base), ("select 2 from t", second));
+        let (sql, base) = sql_to_run(SCRIPT, second + 3..second + 3, RunScope::Script);
+        assert_eq!((sql.as_str(), base), (SCRIPT, 0));
+        // Nothing to pick: the text is sent as it is (and an empty text sends nothing).
+        let (sql, base) = sql_to_run("  ", 1..1, RunScope::Statement);
+        assert_eq!((sql.as_str(), base), ("  ", 0));
+        // A range that is not on character boundaries falls back instead of panicking.
+        let (sql, _) = sql_to_run("é; select 1", 1..1, RunScope::Script);
+        assert_eq!(sql, "é; select 1");
     }
 
     #[test]

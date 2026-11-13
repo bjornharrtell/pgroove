@@ -5,6 +5,7 @@
 pub enum PaletteCommand {
     NewQuery,
     RunQuery,
+    RunScript,
     ExplainQuery,
     AnalyzeQuery,
     FormatSql,
@@ -62,7 +63,16 @@ pub fn groups(connections: &[String], ctx: &PaletteContext) -> Vec<PaletteGroup>
     let mut query = vec![entry(NewQuery, "New query tab", &["tab", "editor"])];
     if connected {
         query.extend([
-            entry(RunQuery, "Run query", &["execute"]),
+            entry(
+                RunQuery,
+                "Run query (selection or statement at cursor)",
+                &["execute", "statement"],
+            ),
+            entry(
+                RunScript,
+                "Run script (selection or everything)",
+                &["execute", "all", "whole"],
+            ),
             entry(ExplainQuery, "Explain query", &["plan"]),
             entry(AnalyzeQuery, "Analyze query", &["plan", "explain analyze"]),
         ]);
@@ -181,7 +191,7 @@ mod tests {
         let g = groups(&["a".to_string()], &ctx(false, true, false));
         assert_eq!(g.len(), 4);
         assert_eq!(titles(&g, 3), ["Open settings", "Check for updates"]);
-        assert!(!titles(&g, 0).contains(&"Run query"));
+        assert!(!titles(&g, 0).iter().any(|t| t.starts_with("Run ")));
         assert_eq!(titles(&g, 1), ["Allow editing (turn off read-only)"]);
         assert_eq!(
             titles(&g, 2),
@@ -197,7 +207,8 @@ mod tests {
     #[test]
     fn connected_palette_lists_everything() {
         let g = groups(&[], &ctx(true, false, true));
-        assert!(titles(&g, 0).contains(&"Run query"));
+        assert!(titles(&g, 0).contains(&"Run query (selection or statement at cursor)"));
+        assert!(titles(&g, 0).contains(&"Run script (selection or everything)"));
         assert!(titles(&g, 0).contains(&"Analyze query"));
         assert!(titles(&g, 1).contains(&"Open activity monitor"));
         assert!(titles(&g, 1).contains(&"Disconnect"));

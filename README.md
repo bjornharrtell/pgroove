@@ -18,7 +18,7 @@ Requires PostgreSQL 13 or newer on the server.
   only read.
 - **Schema browser:** a search box finds tables, views and functions across every schema; lists every database on the server (optional per connection; click to open or close one; several can be open at once, across connections), then a lazy tree of schemas: relations (tables, views and sequences), then types, then functions, plus
   extensions, with context menus (open data or structure, copy name, show definition).
-- **SQL editor:** Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,
+- **SQL editor:** **Run** (`Ctrl+Enter`) runs the selection, or else the statement at the cursor; **Run script** (`Alt+X`) runs the selection, or else the whole script. Run always limits the rows it fetches (200 by default, adjustable up to 10 000 with the Limit button) and says so when the limit cuts a result. Full results go through **Export CSV…**, which streams one query to a file without loading it into memory. Several tabs, syntax highlighting, schema-aware completion, formatter,
   history, snippets, error position highlighting, cancel, `EXPLAIN` and `EXPLAIN ANALYZE`
   with a plan tree that marks the hottest node.
 - **Data viewer:** paged (50 to 10 000 rows per page, remembered), server-side sorting, filter expression, copy or save the page as CSV or JSON, **Export all…** to stream the whole table (with the current filter and sort) to a CSV file,
@@ -136,7 +136,7 @@ open_palette = ["ctrl-p", "cmd-p"]    # several keys
 format_sql = []                       # unbind
 ```
 
-Commands: `run_query` (default `ctrl-enter`), `cancel_query` (`escape`),
+Commands: `run_query` (default `ctrl-enter`), `run_script` (`alt-x`), `cancel_query` (`escape`),
 `format_sql` (`ctrl-shift-f`), `open_palette` (`ctrl-k`), `toggle_fullscreen` (`f11`).
 
 ## Releasing
