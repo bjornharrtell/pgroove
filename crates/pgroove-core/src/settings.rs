@@ -80,6 +80,47 @@ pub fn scaled(px: f32, percent: u32) -> f32 {
     (px * clamp_scale(percent) as f32 / 100.).round()
 }
 
+/// The sizes the settings pane offers, as `(value, label)`: every step from the smallest to
+/// the largest, so the pane can only ask for a size the stepper could reach.
+pub fn scale_options() -> Vec<(u32, String)> {
+    (MIN_SCALE..=MAX_SCALE)
+        .step_by(SCALE_STEP as usize)
+        .map(|p| (p, format!("{p}%")))
+        .collect()
+}
+
+/// The row limits the settings pane offers, as `(value, label)`, with a thin space between
+/// thousands as the limit button writes them.
+pub fn limit_options() -> Vec<(u32, String)> {
+    ROW_LIMIT_PRESETS
+        .iter()
+        .map(|&n| (n, group_thousands(n)))
+        .collect()
+}
+
+/// `n` with a thin space between thousands (`1 234 567`).
+pub fn group_thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The option to show as chosen: `value` when it is one of the options, else the nearest
+/// one (a hand-edited value such as a row limit of 300 shows as 200 or 500, whichever is
+/// closer, rather than as nothing).
+pub fn nearest_option(options: &[(u32, String)], value: u32) -> Option<u32> {
+    options
+        .iter()
+        .map(|(v, _)| *v)
+        .min_by_key(|v| (v.abs_diff(value), *v))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Look for a newer release when the app starts.
@@ -175,6 +216,39 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_options_cover_the_allowed_values() {
+        let sizes = scale_options();
+        assert_eq!(sizes.first().unwrap(), &(75, "75%".to_string()));
+        assert_eq!(sizes.last().unwrap(), &(125, "125%".to_string()));
+        assert_eq!(sizes.len(), 11);
+        assert!(sizes.iter().all(|(v, _)| clamp_scale(*v) == *v));
+        assert!(sizes.iter().any(|(v, _)| *v == DEFAULT_SCALE));
+        let limits = limit_options();
+        assert_eq!(limits.len(), ROW_LIMIT_PRESETS.len());
+        assert_eq!(limits[2], (200, "200".to_string()));
+        assert_eq!(limits.last().unwrap().1, "10\u{202f}000");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1\u{202f}000");
+        assert_eq!(group_thousands(1_234_567), "1\u{202f}234\u{202f}567");
+    }
+
+    #[test]
+    fn a_value_off_the_options_shows_as_the_nearest() {
+        let limits = limit_options();
+        assert_eq!(nearest_option(&limits, 200), Some(200));
+        assert_eq!(
+            nearest_option(&limits, 300),
+            Some(200),
+            "ties go to the lower"
+        );
+        assert_eq!(nearest_option(&limits, 301), Some(200));
+        assert_eq!(nearest_option(&limits, 351), Some(500));
+        assert_eq!(nearest_option(&limits, 0), Some(50));
+        assert_eq!(nearest_option(&limits, u32::MAX), Some(MAX_ROW_LIMIT));
+        assert_eq!(nearest_option(&[], 5), None);
+    }
 
     #[test]
     fn scales_are_clamped_stepped_and_applied() {

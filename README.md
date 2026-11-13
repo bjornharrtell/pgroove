@@ -34,7 +34,7 @@ Requires PostgreSQL 13 or newer on the server.
   title bar to edit.
 - **Monitoring:** sessions (cancel and terminate), blocking locks, `pg_stat_statements`,
   database and table sizes, replication, settings.
-- **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme switchable from the command palette
+- **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme set in the settings tab
   (`Ctrl+K`), and restores your open databases, tabs (queries, tables, activity monitors, the one in front), expanded schemas, search text and window layout.
 
 ## Build and run
@@ -68,13 +68,14 @@ chmod +x pgroove-*.AppImage && ./pgroove-*.AppImage
 
 ## Themes
 
-The command palette (`Ctrl+K`) has an **Appearance** section: follow the system, always light, or
-always dark, and a list of themes. Picking a theme uses it for its mode and switches to that mode.
+The settings tab (**Open settings** in the command palette, `Ctrl+K`) has an **Appearance** page:
+follow the system, always light, or always dark, a light theme and a dark theme. It also holds the
+interface size and the grid size (75% to 125%), which apply at once.
 The bundled themes are the four Catppuccin flavors (Latte; Frappé, Macchiato and Mocha).
 
 To add your own, put theme files (`*.json`, the format of the files in
 [gpui-kit's `themes` folder](https://github.com/longbridge/gpui-kit/tree/main/themes)) into the
-`themes` folder next to `settings.toml`, then run **Load new theme files** (or restart). The choice is
+`themes` folder next to `settings.toml`, then press **Load new theme files** in the settings tab (or restart). The choice is
 stored in `settings.toml`:
 
 ```toml
@@ -94,9 +95,8 @@ verifies its SHA-256 against the checksum published with the release, replaces t
 and then offers **Restart to update**. Nothing is installed without your click, and a release
 without a checksum file is refused.
 
-Turn the startup check off from the command palette ("Turn off automatic update checks"),
-by setting `check_for_updates = false` in `settings.toml`, or with the environment variable
-`PGROOVE_NO_UPDATE_CHECK=1`. "Check for updates" in the palette checks on demand.
+Turn the startup check off in the settings tab, by setting `check_for_updates = false` in
+`settings.toml`, or with the environment variable `PGROOVE_NO_UPDATE_CHECK=1`. "Check for updates" in the palette checks on demand.
 `PGROOVE_UPDATE_URL` points the check at another release feed.
 
 ## Keyboard
@@ -115,7 +115,7 @@ a grid. The sidebar width and editor height are remembered in `session.toml`.
 | File | Location | Purpose |
 |---|---|---|
 | `connections.toml` | config dir `pgroove/` | saved connection profiles (no passwords) |
-| `settings.toml` | config dir `pgroove/` | preferences (update checks, row limit, page size, theme) |
+| `settings.toml` | config dir `pgroove/` | preferences (everything in the settings tab) |
 | `themes/*.json` | config dir `pgroove/` | your own themes |
 | `snippets.toml` | config dir `pgroove/` | saved snippets |
 | `keybindings.toml` | config dir `pgroove/` | keybinding overrides |

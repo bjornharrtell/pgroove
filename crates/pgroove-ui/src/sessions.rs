@@ -85,7 +85,8 @@ impl Workspace {
         let from_tab = match self.tabs.get(self.active_tab) {
             Some(TabKind::Query(q, _)) => q.read(cx).session(),
             Some(TabKind::Table(_, s)) | Some(TabKind::Activity(_, s)) => Some(*s),
-            None => None,
+            // The settings pane belongs to no connection.
+            Some(TabKind::Settings(_)) | None => None,
         };
         from_tab
             .filter(|id| self.session(*id).is_some())
@@ -170,7 +171,7 @@ impl Workspace {
         self.sessions.retain(|s| s.id != id);
         self.tabs.retain(|t| match t {
             TabKind::Table(_, s) | TabKind::Activity(_, s) => *s != id,
-            TabKind::Query(..) => true,
+            TabKind::Query(..) | TabKind::Settings(_) => true,
         });
         for t in &self.tabs {
             if let TabKind::Query(q, _) = t

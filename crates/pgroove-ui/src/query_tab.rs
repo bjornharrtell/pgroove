@@ -119,12 +119,7 @@ impl EventEmitter<RowLimitChanged> for QueryTab {}
 
 /// Formats a limit with a thin grouping space: `10 000`.
 pub fn format_limit(n: u32) -> String {
-    let s = n.to_string();
-    if s.len() <= 3 {
-        return s;
-    }
-    let (head, tail) = s.split_at(s.len() - 3);
-    format!("{head}\u{202f}{tail}")
+    pgroove_core::settings::group_thousands(n)
 }
 
 impl QueryTab {

@@ -15,6 +15,7 @@ mod results;
 mod schema_tree;
 mod selection;
 mod sessions;
+mod settings_view;
 mod sidebar;
 mod sql_completion;
 mod structure_view;

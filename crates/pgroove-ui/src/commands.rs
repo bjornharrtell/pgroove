@@ -3,7 +3,6 @@ use std::rc::Rc;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::*;
 use gpui_kit::*;
-use pgroove_core::settings::Appearance;
 
 use crate::mode::ReadOnlyMode;
 use crate::palette::{self, PaletteCommand};
@@ -14,13 +13,6 @@ impl Workspace {
     /// Runs a palette command; query commands act on the active (or a new) query tab.
     fn run_command(&mut self, cmd: PaletteCommand, window: &mut Window, cx: &mut Context<Self>) {
         use PaletteCommand::*;
-        if let Some((ui, grid)) =
-            palette::resized(&cmd, self.settings.ui_scale, self.settings.grid_scale)
-        {
-            self.settings.ui_scale = ui;
-            self.settings.grid_scale = grid;
-            return self.scales_changed(window, cx);
-        }
         match cmd {
             NewQuery => {
                 self.new_query(window, cx);
@@ -64,41 +56,9 @@ impl Workspace {
                     self.close_session(sid, cx);
                 }
             }
-            SetAppearance(a) => {
-                self.settings.appearance = a;
-                self.save_settings();
-                crate::theme::apply(&self.settings, Some(window), cx);
-            }
-            UseTheme(name) => {
-                // Picking a theme also switches to its mode, so the choice is visible at once.
-                let dark = crate::theme::available(cx)
-                    .into_iter()
-                    .find(|(n, _)| *n == name)
-                    .map(|(_, dark)| dark);
-                match dark {
-                    Some(true) => {
-                        self.settings.dark_theme = name;
-                        self.settings.appearance = Appearance::Dark;
-                    }
-                    Some(false) => {
-                        self.settings.light_theme = name;
-                        self.settings.appearance = Appearance::Light;
-                    }
-                    None => return,
-                }
-                self.save_settings();
-                crate::theme::apply(&self.settings, Some(window), cx);
-            }
-            ReloadThemes => {
-                crate::theme::install(cx);
-                crate::theme::apply(&self.settings, Some(window), cx);
-            }
             CheckUpdates => self.check_updates(true, window, cx),
             InstallUpdate => self.open_update_dialog(window, cx),
-            ToggleUpdateChecks => self.toggle_update_checks(cx),
-            ToggleUppercaseSql => self.toggle_uppercase_sql(cx),
-            // Handled above.
-            StepUiScale(_) | ResetUiScale | StepGridScale(_) | ResetGridScale => {}
+            OpenSettings => self.open_settings(window, cx),
         }
     }
 
@@ -115,14 +75,6 @@ impl Workspace {
                 connected: self.ready_sessions().next().is_some(),
                 read_only: cx.global::<ReadOnlyMode>().0,
                 update_available: matches!(self.update, UpdateState::Available(_)),
-                auto_check_updates: self.settings.check_for_updates,
-                uppercase_generated_sql: self.settings.uppercase_generated_sql,
-                ui_scale: self.settings.ui_scale,
-                grid_scale: self.settings.grid_scale,
-                appearance: self.settings.appearance,
-                light_theme: self.settings.light_theme.clone(),
-                dark_theme: self.settings.dark_theme.clone(),
-                themes: crate::theme::available(cx),
             },
         ));
         let state = cx.new(|cx| CommandState::new(window, cx));

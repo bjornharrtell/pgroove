@@ -7,6 +7,7 @@ use pgroove_core::data::TableRef;
 use crate::activity_view::ActivityView;
 use crate::mode::ReadOnlyMode;
 use crate::query_tab::{EditorResized, QueryTab, RowLimitChanged};
+use crate::settings_view::{ReloadThemesRequested, SettingsChanged, SettingsView, effects};
 use crate::sql_completion::SharedIndex;
 use crate::structure_view::OpenTable;
 use crate::table_view::{AllowEditing, PageSizeChanged, TableView};
@@ -16,19 +17,18 @@ pub(crate) enum TabKind {
     Query(Entity<QueryTab>, usize),
     Activity(Entity<ActivityView>, usize),
     Table(Entity<TableView>, usize),
+    /// The settings pane; there is at most one.
+    Settings(Entity<crate::settings_view::SettingsView>),
 }
 
 impl Workspace {
-    /// The interface or grid size changed (settings already updated): saves it, applies it to
-    /// the theme at once, and has every open grid rebuild its columns.
-    pub(crate) fn scales_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_settings();
-        crate::theme::apply(&self.settings, Some(window), cx);
+    /// Has every open grid rebuild its columns (the kit caches their widths).
+    fn rescale_grids(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             match tab {
                 TabKind::Query(q, _) => q.update(cx, |q, cx| q.rescale(cx)),
                 TabKind::Table(t, _) => t.update(cx, |t, cx| t.rescale(cx)),
-                TabKind::Activity(..) => {}
+                TabKind::Activity(..) | TabKind::Settings(_) => {}
             }
         }
         cx.notify();
@@ -286,6 +286,74 @@ impl Workspace {
             let view = cx.new(|cx| ActivityView::new(client, runtime, window, cx));
             self.tabs.push(TabKind::Activity(view, sid));
             self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    /// Opens the settings tab, or brings the open one to the front.
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let themes = crate::theme::available(cx);
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, TabKind::Settings(_)))
+        {
+            self.active_tab = ix;
+            if let TabKind::Settings(v) = &self.tabs[ix] {
+                let settings = self.settings.clone();
+                v.update(cx, |v, cx| v.sync(settings, themes, cx));
+            }
+        } else {
+            let view = cx.new(|_| SettingsView::new(self.settings.clone(), themes));
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, ev: &SettingsChanged, window, cx| {
+                    this.settings_edited(ev.0.clone(), window, cx)
+                },
+            )
+            .detach();
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, view, _: &ReloadThemesRequested, window, cx| {
+                    crate::theme::install(cx);
+                    crate::theme::apply(&this.settings, Some(window), cx);
+                    let (settings, themes) = (this.settings.clone(), crate::theme::available(cx));
+                    view.update(cx, |v, cx| v.sync(settings, themes, cx));
+                },
+            )
+            .detach();
+            self.tabs.push(TabKind::Settings(view));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    /// Settings were changed in the pane: remember them and apply what differs, at once.
+    fn settings_edited(
+        &mut self,
+        new: pgroove_core::settings::Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fx = effects(&self.settings, &new);
+        if !fx.save {
+            return;
+        }
+        self.settings = new;
+        self.save_settings();
+        if fx.theme {
+            crate::theme::apply(&self.settings, Some(window), cx);
+        }
+        if fx.grid {
+            self.rescale_grids(cx);
+        }
+        if fx.row_limit {
+            self.set_row_limit(self.settings.query_row_limit, cx);
+        }
+        if fx.page_size {
+            self.set_page_size(self.settings.table_page_size, cx);
         }
         cx.notify();
     }

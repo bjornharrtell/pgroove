@@ -307,6 +307,8 @@ impl Workspace {
                     database: s.profile.database.clone(),
                 })
             }
+            // Not restored: reopening it is one palette entry.
+            TabKind::Settings(_) => None,
         }
     }
 
@@ -467,6 +469,20 @@ impl Workspace {
                 q.update(cx, |q, cx| q.apply_limit(limit, cx));
             }
         }
+        self.sync_settings_view(cx);
+    }
+
+    /// Shows the current settings in the settings tab, when one is open: a limit changed from
+    /// a query or table tab is a change of the default too.
+    pub(crate) fn sync_settings_view(&self, cx: &mut Context<Self>) {
+        let themes = crate::theme::available(cx);
+        for t in &self.tabs {
+            if let TabKind::Settings(v) = t {
+                let settings = self.settings.clone();
+                let themes = themes.clone();
+                v.update(cx, |v, cx| v.sync(settings, themes, cx));
+            }
+        }
     }
 
     /// Remembers a new data-viewer page size and gives it to every table tab.
@@ -483,6 +499,7 @@ impl Workspace {
                 v.update(cx, |v, cx| v.apply_page_size(size, cx));
             }
         }
+        self.sync_settings_view(cx);
     }
 
     pub(crate) fn save_settings(&self) {
@@ -710,6 +727,7 @@ impl Workspace {
                     IconName::Table,
                     self.tab_label(&v.read(cx).table().name, *sid),
                 ),
+                TabKind::Settings(_) => (IconName::Settings2, "Settings".to_string()),
             };
             let tab = Tab::new()
                 .child(
@@ -788,6 +806,9 @@ impl Workspace {
                     .child(self.render_activity_server_bar(&v, sid, cx))
                     .child(div().flex_1().min_h_0().child(v))
                     .into_any_element()
+            }
+            Some(TabKind::Settings(v)) => {
+                div().flex_1().min_h_0().child(v.clone()).into_any_element()
             }
             Some(TabKind::Query(q, _)) => {
                 let q = q.clone();
