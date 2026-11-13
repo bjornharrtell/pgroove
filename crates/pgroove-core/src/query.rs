@@ -714,6 +714,23 @@ mod tests {
         }
     }
 
+    /// Needs `PGROOVE_TEST_PG` (see `connect` tests).
+    #[tokio::test]
+    async fn scripts_describe_each_statement_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        let o = run_limited(
+            &client,
+            "select 1 as a; select 'x'::text as b, now() as c",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o.sets[0].types, ["int4"]);
+        assert_eq!(o.sets[1].types, ["text", "timestamptz"]);
+    }
+
     /// Needs `PGROOVE_TEST_PG` and PostGIS (skips without either).
     #[tokio::test]
     async fn geometry_export_is_ewkt_live() {
