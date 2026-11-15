@@ -200,6 +200,63 @@ pub async fn routine(client: &Client, schema: &str, entry: &str) -> Result<Routi
     })
 }
 
+/// Upkeep of a table that is not a change of its name or existence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Maintenance {
+    /// Refreshes the planner's statistics.
+    Analyze,
+    /// Reclaims dead rows (plain `vacuum`, not `full`: that rewrites the table under an
+    /// exclusive lock).
+    Vacuum,
+    /// Empties the table.
+    Truncate,
+}
+
+impl Maintenance {
+    pub const ALL: [Maintenance; 3] = [Self::Analyze, Self::Vacuum, Self::Truncate];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Analyze => "Analyze",
+            Self::Vacuum => "Vacuum",
+            Self::Truncate => "Truncate",
+        }
+    }
+
+    /// Whether the server accepts the operation on this kind of object: analyze on anything
+    /// with rows (a foreign table too), vacuum on local tables and materialized views, truncate
+    /// on tables only. Views, sequences, types and routines have nothing to maintain.
+    pub fn applies_to(self, kind: ObjectKind) -> bool {
+        use ObjectKind::*;
+        match self {
+            Self::Analyze => matches!(
+                kind,
+                Table | PartitionedTable | MaterializedView | ForeignTable
+            ),
+            Self::Vacuum => matches!(kind, Table | PartitionedTable | MaterializedView),
+            Self::Truncate => matches!(kind, Table | PartitionedTable),
+        }
+    }
+}
+
+/// The statement for `op` on `target`; `None` when the target is not an object the operation
+/// applies to. Truncate does not restart identities and does not cascade: a table that a
+/// foreign key points at makes the server refuse, and its message says so.
+pub fn maintenance_sql(op: Maintenance, target: &Target) -> Option<String> {
+    let Target::Object { schema, name, kind } = target else {
+        return None;
+    };
+    if !op.applies_to(*kind) {
+        return None;
+    }
+    let table = format!("{}.{}", quote_ident(schema), quote_ident(name));
+    Some(match op {
+        Maintenance::Analyze => format!("analyze {table}"),
+        Maintenance::Vacuum => format!("vacuum {table}"),
+        Maintenance::Truncate => format!("truncate table {table}"),
+    })
+}
+
 /// Runs one statement built by this module.
 pub async fn run(client: &Client, sql: &str) -> Result<()> {
     client.batch_execute(sql).await?;
@@ -372,6 +429,165 @@ mod tests {
         assert!(validate_name(&wide, "old").is_err());
         // Capitals and spaces are legal names, quoted when used.
         assert_eq!(validate_name("My Table", "old").as_deref(), Ok("My Table"));
+    }
+
+    #[test]
+    fn maintenance_applies_only_where_the_server_accepts_it() {
+        use ObjectKind::*;
+        let applies = |op: Maintenance| -> Vec<ObjectKind> {
+            [
+                Table,
+                PartitionedTable,
+                ForeignTable,
+                View,
+                MaterializedView,
+                Sequence,
+                Function,
+                Procedure,
+                Aggregate,
+                EnumType,
+                CompositeType,
+                DomainType,
+            ]
+            .into_iter()
+            .filter(|k| op.applies_to(*k))
+            .collect()
+        };
+        assert_eq!(
+            applies(Maintenance::Analyze),
+            [Table, PartitionedTable, ForeignTable, MaterializedView]
+        );
+        assert_eq!(
+            applies(Maintenance::Vacuum),
+            [Table, PartitionedTable, MaterializedView]
+        );
+        assert_eq!(applies(Maintenance::Truncate), [Table, PartitionedTable]);
+        assert_eq!(
+            Maintenance::ALL.map(Maintenance::label),
+            ["Analyze", "Vacuum", "Truncate"]
+        );
+    }
+
+    #[test]
+    fn maintenance_statements() {
+        let sql = |op, k| maintenance_sql(op, &object(k));
+        assert_eq!(
+            sql(Maintenance::Analyze, ObjectKind::Table).as_deref(),
+            Some(r#"analyze "s"."t""#)
+        );
+        assert_eq!(
+            sql(Maintenance::Vacuum, ObjectKind::MaterializedView).as_deref(),
+            Some(r#"vacuum "s"."t""#)
+        );
+        assert_eq!(
+            sql(Maintenance::Truncate, ObjectKind::PartitionedTable).as_deref(),
+            Some(r#"truncate table "s"."t""#)
+        );
+        // Refused kinds and non-object targets give nothing.
+        assert_eq!(sql(Maintenance::Truncate, ObjectKind::View), None);
+        assert_eq!(sql(Maintenance::Vacuum, ObjectKind::ForeignTable), None);
+        assert_eq!(sql(Maintenance::Analyze, ObjectKind::Sequence), None);
+        assert_eq!(
+            maintenance_sql(Maintenance::Analyze, &Target::Schema("s".into())),
+            None
+        );
+        assert_eq!(
+            maintenance_sql(
+                Maintenance::Vacuum,
+                &routine_target(ObjectKind::Function, "")
+            ),
+            None
+        );
+        // Names are quoted like everywhere else.
+        let odd = Target::Object {
+            schema: "A b".into(),
+            name: "c\"d".into(),
+            kind: ObjectKind::Table,
+        };
+        assert_eq!(
+            maintenance_sql(Maintenance::Truncate, &odd).as_deref(),
+            Some(r#"truncate table "A b"."c""d""#)
+        );
+    }
+
+    #[tokio::test]
+    async fn analyzes_vacuums_and_truncates_live() {
+        let Some((client, _)) = crate::connect::test_connection().await else {
+            return;
+        };
+        client
+            .batch_execute(
+                "drop schema if exists pgroove_mt cascade; create schema pgroove_mt; \
+                 create table pgroove_mt.parent (id int primary key); \
+                 create table pgroove_mt.child (id int references pgroove_mt.parent(id)); \
+                 create table pgroove_mt.t as select generate_series(1, 1000) as id; \
+                 create materialized view pgroove_mt.m as select id from pgroove_mt.t; \
+                 insert into pgroove_mt.parent values (1); insert into pgroove_mt.child values (1)",
+            )
+            .await
+            .unwrap();
+        let target = |name: &str, kind| Target::Object {
+            schema: "pgroove_mt".into(),
+            name: name.into(),
+            kind,
+        };
+        let count = |name: &'static str| {
+            let client = &client;
+            async move {
+                client
+                    .query_one(&format!("select count(*) from pgroove_mt.{name}"), &[])
+                    .await
+                    .unwrap()
+                    .get::<_, i64>(0)
+            }
+        };
+        // Analyze fills in the statistics; vacuum runs outside a transaction block, as it must.
+        let t = target("t", ObjectKind::Table);
+        run(&client, &maintenance_sql(Maintenance::Analyze, &t).unwrap())
+            .await
+            .unwrap();
+        let tuples: f32 = client
+            .query_one(
+                "select reltuples from pg_class where oid = 'pgroove_mt.t'::regclass",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(tuples as i64, 1000, "analyze should have counted the rows");
+        run(&client, &maintenance_sql(Maintenance::Vacuum, &t).unwrap())
+            .await
+            .unwrap();
+        let m = target("m", ObjectKind::MaterializedView);
+        run(&client, &maintenance_sql(Maintenance::Analyze, &m).unwrap())
+            .await
+            .unwrap();
+        run(&client, &maintenance_sql(Maintenance::Vacuum, &m).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(count("t").await, 1000, "neither touches the rows");
+        // Truncate empties the table.
+        run(
+            &client,
+            &maintenance_sql(Maintenance::Truncate, &t).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count("t").await, 0);
+        // A table a foreign key points at is refused, and nothing is lost.
+        let parent = target("parent", ObjectKind::Table);
+        let err = run(
+            &client,
+            &maintenance_sql(Maintenance::Truncate, &parent).unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("foreign key"), "{err:#}");
+        assert_eq!(count("parent").await, 1);
+        client
+            .batch_execute("drop schema pgroove_mt cascade")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

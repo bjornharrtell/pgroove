@@ -34,7 +34,8 @@ Requires PostgreSQL 13 or newer on the server.
   title bar to edit. In editable mode the tree's context menus also offer **Rename…** and
   **Drop…** for schemas, tables, views, sequences, types and functions. A drop shows its
   statement first and never cascades: if something depends on the object, the server refuses and
-  says what.
+  says what. Tables also get **Analyze**, **Vacuum** (plain, not `FULL`) and **Truncate…** (confirmed
+  first, no `CASCADE`, identities not restarted); materialized views get analyze and vacuum.
 - **Monitoring:** sessions (cancel and terminate), blocking locks, `pg_stat_statements`,
   database and table sizes, replication, settings.
 - **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme set in the settings tab

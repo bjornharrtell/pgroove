@@ -22,6 +22,7 @@ use crate::tabs::TabKind;
 use crate::workspace::{
     SidebarActivate, SidebarCollapse, SidebarDown, SidebarExpand, SidebarUp, Workspace,
 };
+use pgroove_core::ddl::Maintenance;
 
 /// Moves a list cursor by `delta` rows, staying inside `0..len`. With no cursor yet, moving
 /// down selects the first row and moving up the last.
@@ -375,7 +376,33 @@ impl Workspace {
                         kind,
                     };
                     let (rename_this, drop_this) = (ctx_this.clone(), ctx_this.clone());
-                    let (rename_subject, drop_subject) = (subject.clone(), subject);
+                    let (rename_subject, drop_subject) = (subject.clone(), subject.clone());
+                    // Analyze, vacuum and truncate, for the kinds the server accepts them on.
+                    let mut menu = menu;
+                    let ops: Vec<Maintenance> = Maintenance::ALL
+                        .into_iter()
+                        .filter(|op| op.applies_to(kind))
+                        .collect();
+                    if !ops.is_empty() {
+                        menu = menu.separator();
+                        for op in ops {
+                            let (this, subject) = (ctx_this.clone(), subject.clone());
+                            // Truncate asks first, so it ends in an ellipsis like Rename and Drop.
+                            let label = if op == Maintenance::Truncate {
+                                format!("{}…", op.label())
+                            } else {
+                                op.label().to_string()
+                            };
+                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                move |_, window, cx| {
+                                    let subject = subject.clone();
+                                    this.update(cx, |ws, cx| {
+                                        ws.maintain_object(sid, subject, op, window, cx)
+                                    })
+                                },
+                            ));
+                        }
+                    }
                     menu.separator()
                         .item(
                             PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {

@@ -10,7 +10,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pgroove_core::catalog::ObjectKind;
-use pgroove_core::ddl::{self, Target};
+use pgroove_core::ddl::{self, Maintenance, Target};
 
 use crate::dialogs::DialogActions;
 use crate::tabs::TabKind;
@@ -82,6 +82,26 @@ pub fn affects_table(target: &Target, schema: &str, table: &str) -> bool {
     }
 }
 
+/// The message shown when a maintenance operation went through.
+pub fn maintenance_message(op: Maintenance, target: &Target) -> String {
+    let done = match op {
+        Maintenance::Analyze => "Analyzed",
+        Maintenance::Vacuum => "Vacuumed",
+        Maintenance::Truncate => "Truncated",
+    };
+    format!("{done} {}", target.describe())
+}
+
+/// The message shown while a maintenance operation runs (a vacuum can take a while).
+pub fn maintenance_started(op: Maintenance, target: &Target) -> String {
+    let doing = match op {
+        Maintenance::Analyze => "Analyzing",
+        Maintenance::Vacuum => "Vacuuming",
+        Maintenance::Truncate => "Truncating",
+    };
+    format!("{doing} {}…", target.describe())
+}
+
 /// The message shown when a change went through.
 pub fn done_message(target: &Target, new: Option<&str>) -> String {
     match new {
@@ -115,6 +135,109 @@ impl Workspace {
         self.with_target(sid, subject, window, cx, move |ws, target, window, cx| {
             ws.confirm_drop(sid, target, window, cx)
         });
+    }
+
+    /// Runs `op` on a table. Analyze and vacuum are harmless and run at once; truncate shows its
+    /// statement and waits for a confirmation, since it empties the table for good.
+    pub(crate) fn maintain_object(
+        &mut self,
+        sid: usize,
+        subject: Subject,
+        op: Maintenance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = plain_target(&subject) else {
+            return;
+        };
+        let Some(statement) = ddl::maintenance_sql(op, &target) else {
+            return;
+        };
+        if op != Maintenance::Truncate {
+            return self.run_maintenance(sid, target, op, window, cx);
+        }
+        let this = cx.entity();
+        let title = format!("Truncate {}", target.describe());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let (this, target) = (this.clone(), target.clone());
+            let theme = cx.theme().clone();
+            dialog
+                .title(title.clone())
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_sm().child(
+                            "This deletes every row of the table and can't be undone. A table \
+                             that another table's foreign key points at is not truncated: the \
+                             server refuses and says which.",
+                        ))
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded(px(4.))
+                                .bg(theme.muted)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_sm()
+                                .child(statement.clone()),
+                        ),
+                )
+                .actions("Truncate", true, move |_, window, cx| {
+                    let target = target.clone();
+                    this.update(cx, |ws, cx| {
+                        ws.run_maintenance(sid, target, Maintenance::Truncate, window, cx)
+                    });
+                    true
+                })
+        });
+    }
+
+    fn run_maintenance(
+        &mut self,
+        sid: usize,
+        target: Target,
+        op: Maintenance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client_of(sid) else {
+            return;
+        };
+        let Some(sql) = ddl::maintenance_sql(op, &target) else {
+            return;
+        };
+        window.push_notification(maintenance_started(op, &target), cx);
+        let task = self
+            .runtime
+            .spawn(async move { ddl::run(&client, &sql).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = flatten(task.await);
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    window.push_notification(maintenance_message(op, &target), cx);
+                    // Row counts and sizes in the tree, and the rows an open tab shows, changed.
+                    this.reload_tabs_of(sid, &target, cx);
+                    this.refresh_session(sid, cx);
+                }
+                Err(e) => window.push_notification(Notification::error(e), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reloads the table tabs that show `target`, for after an operation that changed its rows.
+    fn reload_tabs_of(&mut self, sid: usize, target: &Target, cx: &mut Context<Self>) {
+        for t in &self.tabs {
+            if let TabKind::Table(v, s) = t
+                && *s == sid
+            {
+                let table = v.read(cx).table().clone();
+                if affects_table(target, &table.schema, &table.name) {
+                    v.update(cx, |v, cx| v.reload(cx));
+                }
+            }
+        }
     }
 
     /// Resolves the subject to a target (a routine needs a catalog lookup for its signature)
@@ -301,9 +424,12 @@ impl Workspace {
 mod tests {
     // Explicit imports: a glob of `super::*` would bring in `gpui_kit::test`, which shadows the
     // built-in `#[test]`.
-    use super::{Subject, affects_table, done_message, plain_target, routine_target};
+    use super::{
+        Subject, affects_table, done_message, maintenance_message, maintenance_started,
+        plain_target, routine_target,
+    };
     use pgroove_core::catalog::ObjectKind;
-    use pgroove_core::ddl::{self, Target};
+    use pgroove_core::ddl::{self, Maintenance, Target};
 
     fn object(kind: ObjectKind) -> Subject {
         Subject::Object {
@@ -403,6 +529,40 @@ mod tests {
             kind: ObjectKind::Function,
         };
         assert!(!affects_table(&routine, "s", "t"));
+    }
+
+    #[test]
+    fn maintenance_messages_say_what_was_done() {
+        let t = Target::Object {
+            schema: "s".into(),
+            name: "t".into(),
+            kind: ObjectKind::Table,
+        };
+        let table = "table \"s\".\"t\"";
+        assert_eq!(
+            maintenance_message(Maintenance::Analyze, &t),
+            format!("Analyzed {table}")
+        );
+        assert_eq!(
+            maintenance_message(Maintenance::Vacuum, &t),
+            format!("Vacuumed {table}")
+        );
+        assert_eq!(
+            maintenance_message(Maintenance::Truncate, &t),
+            format!("Truncated {table}")
+        );
+        assert_eq!(
+            maintenance_started(Maintenance::Analyze, &t),
+            format!("Analyzing {table}…")
+        );
+        assert_eq!(
+            maintenance_started(Maintenance::Vacuum, &t),
+            format!("Vacuuming {table}…")
+        );
+        assert_eq!(
+            maintenance_started(Maintenance::Truncate, &t),
+            format!("Truncating {table}…")
+        );
     }
 
     #[test]
