@@ -45,7 +45,7 @@ pub struct Edges {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Marking {
     pub edges: Edges,
-    /// The active cell (where the selection started) stays untinted so it stands out.
+    /// The active cell (the one under the pointer) stays untinted so it stands out.
     pub tint: bool,
 }
 
@@ -64,7 +64,8 @@ pub struct CellSelection {
     anchor: Option<(usize, usize)>,
     /// A drag is in progress: moving over cells reshapes the last block.
     dragging: bool,
-    /// The cell the drag has reached, i.e. the end of the block opposite the anchor.
+    /// The active cell: where the pointer last pressed or dragged to (the end of the block
+    /// opposite the anchor), drawn with the heavy frame.
     cursor: Option<(usize, usize)>,
 }
 
@@ -88,7 +89,7 @@ impl CellSelection {
         if !self.contains(row, col) {
             return None;
         }
-        if self.anchor == Some((row, col)) {
+        if self.cursor == Some((row, col)) {
             let all = Edges {
                 top: true,
                 right: true,
@@ -172,6 +173,7 @@ impl CellSelection {
             return;
         }
         let last = cols - 1;
+        self.cursor = Some((row, 0));
         match (mods.extend, self.anchor) {
             (true, Some(anchor)) => {
                 let block = Rect::between((anchor.0, 0), (row, last));
@@ -200,6 +202,7 @@ impl CellSelection {
         }
         self.ranges = vec![Rect::between((0, 0), (rows - 1, cols - 1))];
         self.anchor = Some((0, 0));
+        self.cursor = Some((0, 0));
     }
 
     /// Rows touched by the selection, ascending.
@@ -344,20 +347,20 @@ mod tests {
         s.drag_to((2, 2));
         s.release();
         let m = |r, c| s.marking(r, c).expect("selected");
-        // The anchor is outlined on every side and left untinted.
-        let anchor = m(1, 1);
-        assert!(!anchor.tint);
-        assert!(anchor.edges.top && anchor.edges.right && anchor.edges.bottom && anchor.edges.left);
-        // The opposite corner is outlined only on the outside.
-        let corner = m(2, 2);
-        assert!(corner.tint);
+        // The cell the drag ended on is the active one: outlined on every side, untinted.
+        let active = m(2, 2);
+        assert!(!active.tint);
+        assert!(active.edges.top && active.edges.right && active.edges.bottom && active.edges.left);
+        // The cell the drag started on is outlined only on the outside.
+        let start = m(1, 1);
+        assert!(start.tint);
         assert_eq!(
-            corner.edges,
+            start.edges,
             Edges {
-                top: false,
-                right: true,
-                bottom: true,
-                left: false
+                top: true,
+                right: false,
+                bottom: false,
+                left: true
             }
         );
         assert_eq!(s.marking(3, 3), None);
