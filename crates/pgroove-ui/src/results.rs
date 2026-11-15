@@ -180,7 +180,8 @@ impl ResultsTable {
     /// selection follows to that single cell, or to the whole row when it landed in the gutter.
     pub fn cell_selected(&mut self, (row, kit_col): (usize, usize)) -> (usize, usize) {
         let cell = (row, kit_col.saturating_sub(GUTTER));
-        if std::mem::take(&mut self.press_pending) {
+        // The click itself, or the active cell following a drag: keep the marked block.
+        if std::mem::take(&mut self.press_pending) || self.selection.is_dragging() {
             return cell;
         }
         if kit_col < GUTTER {
@@ -512,7 +513,7 @@ impl ResultsTable {
                 {
                     // The cell under the pointer becomes the active one (shown in the
                     // inspector), not the one the drag started on.
-                    state.set_selected_cell(row_ix, col_ix, cx);
+                    state.set_selected_cell(row_ix, col_ix + GUTTER, cx);
                     cx.notify();
                 }
             }))
