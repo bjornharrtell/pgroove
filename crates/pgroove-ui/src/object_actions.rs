@@ -5,6 +5,10 @@
 //! a refusal because something depends on the object) is shown as it is, and on success the
 //! tree is reloaded and the tabs that showed the object are closed.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
@@ -83,13 +87,18 @@ pub fn affects_table(target: &Target, schema: &str, table: &str) -> bool {
 }
 
 /// The message shown when a maintenance operation went through.
-pub fn maintenance_message(op: Maintenance, target: &Target) -> String {
+pub fn maintenance_message(op: Maintenance, target: &Target, cascade: bool) -> String {
     let done = match op {
         Maintenance::Analyze => "Analyzed",
         Maintenance::Vacuum => "Vacuumed",
         Maintenance::Truncate => "Truncated",
     };
-    format!("{done} {}", target.describe())
+    let tail = if cascade && op.has_cascade() {
+        " and the tables that reference it"
+    } else {
+        ""
+    };
+    format!("{done} {}{tail}", target.describe())
 }
 
 /// The message shown while a maintenance operation runs (a vacuum can take a while).
@@ -103,11 +112,55 @@ pub fn maintenance_started(op: Maintenance, target: &Target) -> String {
 }
 
 /// The message shown when a change went through.
-pub fn done_message(target: &Target, new: Option<&str>) -> String {
+pub fn done_message(target: &Target, new: Option<&str>, cascade: bool) -> String {
     match new {
         Some(new) => format!("Renamed {} to {}", target.describe(), new),
+        None if cascade => format!(
+            "Dropped {} and everything that depended on it",
+            target.describe()
+        ),
         None => format!("Dropped {}", target.describe()),
     }
+}
+
+/// What the cascade checkbox says, for a drop or for a truncate.
+pub fn cascade_label(truncate: bool) -> &'static str {
+    if truncate {
+        "Cascade: also empty every table that references this one"
+    } else {
+        "Cascade: also drop everything that depends on it"
+    }
+}
+
+/// The explanation in the dialog. With cascade off the server refuses when something depends on
+/// the object; with it on, the dependents are removed too and nothing is listed beforehand.
+pub fn confirm_text(truncate: bool, cascade: bool) -> &'static str {
+    match (truncate, cascade) {
+        (false, false) => {
+            "This runs the statement below and can't be undone. Objects that depend on it are not dropped: if there are any, the server refuses and says which."
+        }
+        (false, true) => {
+            "This runs the statement below and can't be undone. Everything that depends on the object, such as views, foreign keys and functions that use it, is dropped with it, and you are not shown which."
+        }
+        (true, false) => {
+            "This deletes every row of the table and can't be undone. A table that another table's foreign key points at is not truncated: the server refuses and says which."
+        }
+        (true, true) => {
+            "This deletes every row of the table and of every table that references it, and can't be undone. You are not shown which tables that are."
+        }
+    }
+}
+
+/// A checkbox bound to a flag the dialog's buttons read; the dialog is redrawn when it flips.
+fn cascade_checkbox(flag: &Rc<Cell<bool>>, truncate: bool) -> Checkbox {
+    let shared = flag.clone();
+    Checkbox::new("cascade")
+        .label(cascade_label(truncate))
+        .checked(flag.get())
+        .on_click(move |on, window, _| {
+            shared.set(*on);
+            window.refresh();
+        })
 }
 
 impl Workspace {
@@ -150,28 +203,29 @@ impl Workspace {
         let Some(target) = plain_target(&subject) else {
             return;
         };
-        let Some(statement) = ddl::maintenance_sql(op, &target) else {
+        if ddl::maintenance_sql(op, &target, false).is_none() {
             return;
-        };
+        }
         if op != Maintenance::Truncate {
-            return self.run_maintenance(sid, target, op, window, cx);
+            return self.run_maintenance(sid, target, op, false, window, cx);
         }
         let this = cx.entity();
         let title = format!("Truncate {}", target.describe());
+        // Off until ticked, every time the dialog opens.
+        let cascade = Rc::new(Cell::new(false));
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (this, target) = (this.clone(), target.clone());
+            let (this, target, cascade) = (this.clone(), target.clone(), cascade.clone());
             let theme = cx.theme().clone();
+            let statement = ddl::maintenance_sql(Maintenance::Truncate, &target, cascade.get())
+                .unwrap_or_default();
             dialog
                 .title(title.clone())
                 .w(px(520.))
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_sm().child(
-                            "This deletes every row of the table and can't be undone. A table \
-                             that another table's foreign key points at is not truncated: the \
-                             server refuses and says which.",
-                        ))
+                        .child(div().text_sm().child(confirm_text(true, cascade.get())))
+                        .child(cascade_checkbox(&cascade, true))
                         .child(
                             div()
                                 .p_2()
@@ -179,13 +233,13 @@ impl Workspace {
                                 .bg(theme.muted)
                                 .font_family(theme.mono_font_family.clone())
                                 .text_sm()
-                                .child(statement.clone()),
+                                .child(statement),
                         ),
                 )
                 .actions("Truncate", true, move |_, window, cx| {
-                    let target = target.clone();
+                    let (target, cascade) = (target.clone(), cascade.get());
                     this.update(cx, |ws, cx| {
-                        ws.run_maintenance(sid, target, Maintenance::Truncate, window, cx)
+                        ws.run_maintenance(sid, target, Maintenance::Truncate, cascade, window, cx)
                     });
                     true
                 })
@@ -197,13 +251,14 @@ impl Workspace {
         sid: usize,
         target: Target,
         op: Maintenance,
+        cascade: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(client) = self.client_of(sid) else {
             return;
         };
-        let Some(sql) = ddl::maintenance_sql(op, &target) else {
+        let Some(sql) = ddl::maintenance_sql(op, &target, cascade) else {
             return;
         };
         window.push_notification(maintenance_started(op, &target), cx);
@@ -214,9 +269,15 @@ impl Workspace {
             let result = flatten(task.await);
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
-                    window.push_notification(maintenance_message(op, &target), cx);
+                    window.push_notification(maintenance_message(op, &target, cascade), cx);
                     // Row counts and sizes in the tree, and the rows an open tab shows, changed.
-                    this.reload_tabs_of(sid, &target, cx);
+                    // A cascade empties tables we cannot name, so every table tab of the database
+                    // reloads then.
+                    if cascade && op.has_cascade() {
+                        this.reload_all_tabs_of(sid, cx);
+                    } else {
+                        this.reload_tabs_of(sid, &target, cx);
+                    }
                     this.refresh_session(sid, cx);
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
@@ -236,6 +297,17 @@ impl Workspace {
                 if affects_table(target, &table.schema, &table.name) {
                     v.update(cx, |v, cx| v.reload(cx));
                 }
+            }
+        }
+    }
+
+    /// Reloads every table tab of the database.
+    fn reload_all_tabs_of(&mut self, sid: usize, cx: &mut Context<Self>) {
+        for t in &self.tabs {
+            if let TabKind::Table(v, s) = t
+                && *s == sid
+            {
+                v.update(cx, |v, cx| v.reload(cx));
             }
         }
     }
@@ -305,7 +377,7 @@ impl Workspace {
                         Ok(new) => {
                             let target = target.clone();
                             this.update(cx, |ws, cx| {
-                                ws.run_ddl(sid, target, Some(new), window, cx)
+                                ws.run_ddl(sid, target, Some(new), false, window, cx)
                             });
                             true
                         }
@@ -325,25 +397,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(statement) = ddl::drop_sql(&target) else {
+        if ddl::drop_sql(&target, false).is_none() {
             return;
-        };
+        }
         let this = cx.entity();
         let title = format!("Drop {}", target.describe());
+        // Off until ticked, every time the dialog opens.
+        let cascade = Rc::new(Cell::new(false));
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (this, target) = (this.clone(), target.clone());
+            let (this, target, cascade) = (this.clone(), target.clone(), cascade.clone());
             let theme = cx.theme().clone();
+            let statement = ddl::drop_sql(&target, cascade.get()).unwrap_or_default();
             dialog
                 .title(title.clone())
                 .w(px(520.))
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_sm().child(
-                            "This runs the statement below and can't be undone. Objects that \
-                             depend on it are not dropped: if there are any, the server \
-                             refuses and says which.",
-                        ))
+                        .child(div().text_sm().child(confirm_text(false, cascade.get())))
+                        .child(cascade_checkbox(&cascade, false))
                         .child(
                             div()
                                 .p_2()
@@ -351,23 +423,27 @@ impl Workspace {
                                 .bg(theme.muted)
                                 .font_family(theme.mono_font_family.clone())
                                 .text_sm()
-                                .child(statement.clone()),
+                                .child(statement),
                         ),
                 )
                 .actions("Drop", true, move |_, window, cx| {
-                    let target = target.clone();
-                    this.update(cx, |ws, cx| ws.run_ddl(sid, target, None, window, cx));
+                    let (target, cascade) = (target.clone(), cascade.get());
+                    this.update(cx, |ws, cx| {
+                        ws.run_ddl(sid, target, None, cascade, window, cx)
+                    });
                     true
                 })
         });
     }
 
-    /// Runs the rename (`new` is the name) or the drop (`None`), then reports and reloads.
+    /// Runs the rename (`new` is the name) or the drop (`None`, with `cascade` if ticked), then
+    /// reports and reloads.
     fn run_ddl(
         &mut self,
         sid: usize,
         target: Target,
         new: Option<String>,
+        cascade: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -376,7 +452,7 @@ impl Workspace {
         };
         let sql = match &new {
             Some(name) => ddl::rename_sql(&target, name),
-            None => ddl::drop_sql(&target),
+            None => ddl::drop_sql(&target, cascade),
         };
         let Some(sql) = sql else {
             return;
@@ -388,8 +464,13 @@ impl Workspace {
             let result = flatten(task.await);
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
-                    window.push_notification(done_message(&target, new.as_deref()), cx);
+                    window.push_notification(done_message(&target, new.as_deref(), cascade), cx);
                     this.close_tabs_of(sid, &target, cx);
+                    // A cascade drops objects we cannot name; a table tab of one of them now
+                    // reloads into the server's "does not exist" instead of showing stale rows.
+                    if cascade && new.is_none() {
+                        this.reload_all_tabs_of(sid, cx);
+                    }
                     this.refresh_session(sid, cx);
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
@@ -425,8 +506,8 @@ mod tests {
     // Explicit imports: a glob of `super::*` would bring in `gpui_kit::test`, which shadows the
     // built-in `#[test]`.
     use super::{
-        Subject, affects_table, done_message, maintenance_message, maintenance_started,
-        plain_target, routine_target,
+        Subject, affects_table, cascade_label, confirm_text, done_message, maintenance_message,
+        maintenance_started, plain_target, routine_target,
     };
     use pgroove_core::catalog::ObjectKind;
     use pgroove_core::ddl::{self, Maintenance, Target};
@@ -540,16 +621,25 @@ mod tests {
         };
         let table = "table \"s\".\"t\"";
         assert_eq!(
-            maintenance_message(Maintenance::Analyze, &t),
+            maintenance_message(Maintenance::Analyze, &t, false),
             format!("Analyzed {table}")
         );
         assert_eq!(
-            maintenance_message(Maintenance::Vacuum, &t),
+            maintenance_message(Maintenance::Vacuum, &t, false),
             format!("Vacuumed {table}")
         );
         assert_eq!(
-            maintenance_message(Maintenance::Truncate, &t),
+            maintenance_message(Maintenance::Truncate, &t, false),
             format!("Truncated {table}")
+        );
+        // Only a truncate has a cascade to report.
+        assert_eq!(
+            maintenance_message(Maintenance::Truncate, &t, true),
+            format!("Truncated {table} and the tables that reference it")
+        );
+        assert_eq!(
+            maintenance_message(Maintenance::Vacuum, &t, true),
+            format!("Vacuumed {table}")
         );
         assert_eq!(
             maintenance_started(Maintenance::Analyze, &t),
@@ -572,10 +662,34 @@ mod tests {
             name: "t".into(),
             kind: ObjectKind::Table,
         };
-        assert_eq!(done_message(&t, None), "Dropped table \"s\".\"t\"");
+        assert_eq!(done_message(&t, None, false), "Dropped table \"s\".\"t\"");
         assert_eq!(
-            done_message(&t, Some("u")),
+            done_message(&t, None, true),
+            "Dropped table \"s\".\"t\" and everything that depended on it"
+        );
+        assert_eq!(
+            done_message(&t, Some("u"), false),
             "Renamed table \"s\".\"t\" to u"
         );
+        // A rename never cascades, whatever the flag.
+        assert_eq!(
+            done_message(&t, Some("u"), true),
+            "Renamed table \"s\".\"t\" to u"
+        );
+    }
+
+    #[test]
+    fn the_dialog_says_what_the_cascade_does() {
+        // The text follows the checkbox, for both a drop and a truncate.
+        assert!(confirm_text(false, false).contains("the server refuses"));
+        assert!(confirm_text(false, true).contains("is dropped with it"));
+        assert!(confirm_text(true, false).contains("the server refuses"));
+        assert!(confirm_text(true, true).contains("every table that references it"));
+        for (truncate, cascade) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(confirm_text(truncate, cascade).contains("can't be undone"));
+        }
+        assert!(cascade_label(false).starts_with("Cascade"));
+        assert!(cascade_label(true).contains("references"));
+        assert_ne!(cascade_label(false), cascade_label(true));
     }
 }

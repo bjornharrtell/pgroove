@@ -143,10 +143,16 @@ fn keyword(kind: ObjectKind) -> &'static str {
     }
 }
 
-/// `drop … <object>`. Never `cascade`: if something depends on the object the server refuses
-/// and says what, which is the answer a person needs before deciding to go further.
-pub fn drop_sql(target: &Target) -> Option<String> {
-    Some(format!("drop {} {}", target.keyword(), target.reference()?))
+/// `drop … <object>`, with `cascade` when asked: that also drops everything that depends on
+/// the object, recursively, so it is opt-in and the dialogs ask for it explicitly. Without it,
+/// if something depends on the object the server refuses and says what.
+pub fn drop_sql(target: &Target, cascade: bool) -> Option<String> {
+    let base = format!("drop {} {}", target.keyword(), target.reference()?);
+    Some(if cascade {
+        format!("{base} cascade")
+    } else {
+        base
+    })
 }
 
 /// `alter … <object> rename to <new>`; `new` is quoted here.
@@ -223,6 +229,12 @@ impl Maintenance {
         }
     }
 
+    /// Whether the operation has a `cascade` form: truncate empties the tables that foreign keys
+    /// point from too. Analyze and vacuum have nothing to cascade to.
+    pub fn has_cascade(self) -> bool {
+        self == Self::Truncate
+    }
+
     /// Whether the server accepts the operation on this kind of object: analyze on anything
     /// with rows (a foreign table too), vacuum on local tables and materialized views, truncate
     /// on tables only. Views, sequences, types and routines have nothing to maintain.
@@ -240,9 +252,10 @@ impl Maintenance {
 }
 
 /// The statement for `op` on `target`; `None` when the target is not an object the operation
-/// applies to. Truncate does not restart identities and does not cascade: a table that a
-/// foreign key points at makes the server refuse, and its message says so.
-pub fn maintenance_sql(op: Maintenance, target: &Target) -> Option<String> {
+/// applies to. Truncate does not restart identities. `cascade` adds `cascade` to a truncate (it
+/// also empties every table whose foreign key points at this one); without it such a table
+/// makes the server refuse and say so. The other operations have no cascade form and ignore it.
+pub fn maintenance_sql(op: Maintenance, target: &Target, cascade: bool) -> Option<String> {
     let Target::Object { schema, name, kind } = target else {
         return None;
     };
@@ -250,10 +263,15 @@ pub fn maintenance_sql(op: Maintenance, target: &Target) -> Option<String> {
         return None;
     }
     let table = format!("{}.{}", quote_ident(schema), quote_ident(name));
+    let tail = if cascade && op.has_cascade() {
+        " cascade"
+    } else {
+        ""
+    };
     Some(match op {
         Maintenance::Analyze => format!("analyze {table}"),
         Maintenance::Vacuum => format!("vacuum {table}"),
-        Maintenance::Truncate => format!("truncate table {table}"),
+        Maintenance::Truncate => format!("truncate table {table}{tail}"),
     })
 }
 
@@ -286,7 +304,7 @@ mod tests {
 
     #[test]
     fn drops_each_kind_with_its_keyword() {
-        let sql = |k| drop_sql(&object(k)).unwrap();
+        let sql = |k| drop_sql(&object(k), false).unwrap();
         assert_eq!(sql(ObjectKind::Table), r#"drop table "s"."t""#);
         assert_eq!(sql(ObjectKind::PartitionedTable), r#"drop table "s"."t""#);
         assert_eq!(
@@ -303,7 +321,7 @@ mod tests {
         assert_eq!(sql(ObjectKind::CompositeType), r#"drop type "s"."t""#);
         assert_eq!(sql(ObjectKind::DomainType), r#"drop domain "s"."t""#);
         assert_eq!(
-            drop_sql(&Target::Schema("s".into())).unwrap(),
+            drop_sql(&Target::Schema("s".into()), false).unwrap(),
             r#"drop schema "s""#
         );
     }
@@ -346,7 +364,7 @@ mod tests {
     fn routines_carry_their_arguments() {
         let f = routine_target(ObjectKind::Function, "a integer, b integer");
         assert_eq!(
-            drop_sql(&f).unwrap(),
+            drop_sql(&f, false).unwrap(),
             r#"drop function "s"."f"(a integer, b integer)"#
         );
         assert_eq!(
@@ -354,29 +372,32 @@ mod tests {
             r#"alter function "s"."f"(a integer, b integer) rename to "g""#
         );
         assert_eq!(
-            drop_sql(&routine_target(ObjectKind::Procedure, "")).unwrap(),
+            drop_sql(&routine_target(ObjectKind::Procedure, ""), false).unwrap(),
             r#"drop procedure "s"."f"()"#
         );
         assert_eq!(
-            drop_sql(&routine_target(ObjectKind::Aggregate, "integer")).unwrap(),
+            drop_sql(&routine_target(ObjectKind::Aggregate, "integer"), false).unwrap(),
             r#"drop aggregate "s"."f"(integer)"#
         );
         // An aggregate over no arguments is `(*)`; a function over none stays `()`.
         assert_eq!(
-            drop_sql(&routine_target(ObjectKind::Aggregate, "")).unwrap(),
+            drop_sql(&routine_target(ObjectKind::Aggregate, ""), false).unwrap(),
             r#"drop aggregate "s"."f"(*)"#
         );
         assert_eq!(
-            drop_sql(&routine_target(ObjectKind::Function, "")).unwrap(),
+            drop_sql(&routine_target(ObjectKind::Function, ""), false).unwrap(),
             r#"drop function "s"."f"()"#
         );
     }
 
     #[test]
     fn a_target_that_cannot_be_named_gives_no_statement() {
-        assert_eq!(drop_sql(&object(ObjectKind::Function)), None);
+        assert_eq!(drop_sql(&object(ObjectKind::Function), false), None);
         assert_eq!(rename_sql(&object(ObjectKind::Aggregate), "n"), None);
-        assert_eq!(drop_sql(&routine_target(ObjectKind::Table, "")), None);
+        assert_eq!(
+            drop_sql(&routine_target(ObjectKind::Table, ""), false),
+            None
+        );
     }
 
     #[test]
@@ -386,7 +407,10 @@ mod tests {
             name: "a\"b".into(),
             kind: ObjectKind::Table,
         };
-        assert_eq!(drop_sql(&t).unwrap(), r#"drop table "My Schema"."a""b""#);
+        assert_eq!(
+            drop_sql(&t, false).unwrap(),
+            r#"drop table "My Schema"."a""b""#
+        );
         assert_eq!(
             rename_sql(&t, "x\"; drop table y; --").unwrap(),
             r#"alter table "My Schema"."a""b" rename to "x""; drop table y; --""#
@@ -469,8 +493,46 @@ mod tests {
     }
 
     #[test]
+    fn cascade_is_added_only_when_asked() {
+        let table = object(ObjectKind::Table);
+        assert_eq!(
+            drop_sql(&table, true).unwrap(),
+            r#"drop table "s"."t" cascade"#
+        );
+        assert_eq!(drop_sql(&table, false).unwrap(), r#"drop table "s"."t""#);
+        assert_eq!(
+            drop_sql(&Target::Schema("s".into()), true).unwrap(),
+            r#"drop schema "s" cascade"#
+        );
+        let f = routine_target(ObjectKind::Function, "a integer");
+        assert_eq!(
+            drop_sql(&f, true).unwrap(),
+            r#"drop function "s"."f"(a integer) cascade"#
+        );
+        // A target that cannot be named is still refused, cascade or not.
+        assert_eq!(drop_sql(&object(ObjectKind::Function), true), None);
+        assert_eq!(
+            maintenance_sql(Maintenance::Truncate, &table, true).unwrap(),
+            r#"truncate table "s"."t" cascade"#
+        );
+        assert_eq!(
+            maintenance_sql(Maintenance::Truncate, &table, false).unwrap(),
+            r#"truncate table "s"."t""#
+        );
+        // Analyze and vacuum have no cascade form: the flag changes nothing.
+        for op in [Maintenance::Analyze, Maintenance::Vacuum] {
+            assert_eq!(
+                maintenance_sql(op, &table, true),
+                maintenance_sql(op, &table, false)
+            );
+            assert!(!op.has_cascade());
+        }
+        assert!(Maintenance::Truncate.has_cascade());
+    }
+
+    #[test]
     fn maintenance_statements() {
-        let sql = |op, k| maintenance_sql(op, &object(k));
+        let sql = |op, k| maintenance_sql(op, &object(k), false);
         assert_eq!(
             sql(Maintenance::Analyze, ObjectKind::Table).as_deref(),
             Some(r#"analyze "s"."t""#)
@@ -488,13 +550,14 @@ mod tests {
         assert_eq!(sql(Maintenance::Vacuum, ObjectKind::ForeignTable), None);
         assert_eq!(sql(Maintenance::Analyze, ObjectKind::Sequence), None);
         assert_eq!(
-            maintenance_sql(Maintenance::Analyze, &Target::Schema("s".into())),
+            maintenance_sql(Maintenance::Analyze, &Target::Schema("s".into()), false),
             None
         );
         assert_eq!(
             maintenance_sql(
                 Maintenance::Vacuum,
-                &routine_target(ObjectKind::Function, "")
+                &routine_target(ObjectKind::Function, ""),
+                false
             ),
             None
         );
@@ -505,7 +568,7 @@ mod tests {
             kind: ObjectKind::Table,
         };
         assert_eq!(
-            maintenance_sql(Maintenance::Truncate, &odd).as_deref(),
+            maintenance_sql(Maintenance::Truncate, &odd, false).as_deref(),
             Some(r#"truncate table "A b"."c""d""#)
         );
     }
@@ -543,9 +606,12 @@ mod tests {
         };
         // Analyze fills in the statistics; vacuum runs outside a transaction block, as it must.
         let t = target("t", ObjectKind::Table);
-        run(&client, &maintenance_sql(Maintenance::Analyze, &t).unwrap())
-            .await
-            .unwrap();
+        run(
+            &client,
+            &maintenance_sql(Maintenance::Analyze, &t, false).unwrap(),
+        )
+        .await
+        .unwrap();
         let tuples: f32 = client
             .query_one(
                 "select reltuples from pg_class where oid = 'pgroove_mt.t'::regclass",
@@ -555,21 +621,30 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(tuples as i64, 1000, "analyze should have counted the rows");
-        run(&client, &maintenance_sql(Maintenance::Vacuum, &t).unwrap())
-            .await
-            .unwrap();
+        run(
+            &client,
+            &maintenance_sql(Maintenance::Vacuum, &t, false).unwrap(),
+        )
+        .await
+        .unwrap();
         let m = target("m", ObjectKind::MaterializedView);
-        run(&client, &maintenance_sql(Maintenance::Analyze, &m).unwrap())
-            .await
-            .unwrap();
-        run(&client, &maintenance_sql(Maintenance::Vacuum, &m).unwrap())
-            .await
-            .unwrap();
+        run(
+            &client,
+            &maintenance_sql(Maintenance::Analyze, &m, false).unwrap(),
+        )
+        .await
+        .unwrap();
+        run(
+            &client,
+            &maintenance_sql(Maintenance::Vacuum, &m, false).unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(count("t").await, 1000, "neither touches the rows");
         // Truncate empties the table.
         run(
             &client,
-            &maintenance_sql(Maintenance::Truncate, &t).unwrap(),
+            &maintenance_sql(Maintenance::Truncate, &t, false).unwrap(),
         )
         .await
         .unwrap();
@@ -578,12 +653,16 @@ mod tests {
         let parent = target("parent", ObjectKind::Table);
         let err = run(
             &client,
-            &maintenance_sql(Maintenance::Truncate, &parent).unwrap(),
+            &maintenance_sql(Maintenance::Truncate, &parent, false).unwrap(),
         )
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("foreign key"), "{err:#}");
         assert_eq!(count("parent").await, 1);
+        // With cascade it goes through, and empties the referencing table too.
+        let cascade = maintenance_sql(Maintenance::Truncate, &parent, true).unwrap();
+        run(&client, &cascade).await.unwrap();
+        assert_eq!((count("parent").await, count("child").await), (0, 0));
         client
             .batch_execute("drop schema pgroove_mt cascade")
             .await
@@ -703,7 +782,7 @@ mod tests {
             args: cnt.args,
             kind: ObjectKind::Aggregate,
         };
-        run(&client, &drop_sql(&agg).unwrap()).await.unwrap();
+        run(&client, &drop_sql(&agg, false).unwrap()).await.unwrap();
         let mysum = routine(&client, "pgroove_ddl", "mysum(integer)")
             .await
             .unwrap();
@@ -716,7 +795,7 @@ mod tests {
         run(&client, &rename_sql(&agg, "total").unwrap())
             .await
             .unwrap();
-        run(&client, &drop_sql(&agg_renamed()).unwrap())
+        run(&client, &drop_sql(&agg_renamed(), false).unwrap())
             .await
             .unwrap();
         let noop = routine(&client, "pgroove_ddl", "noop()").await.unwrap();
@@ -726,7 +805,9 @@ mod tests {
             args: noop.args,
             kind: ObjectKind::Procedure,
         };
-        run(&client, &drop_sql(&proc_).unwrap()).await.unwrap();
+        run(&client, &drop_sql(&proc_, false).unwrap())
+            .await
+            .unwrap();
 
         // A drop with a dependent object is refused, and says why (no cascade).
         let dep = Target::Object {
@@ -734,8 +815,35 @@ mod tests {
             name: "t 2".into(),
             kind: ObjectKind::Table,
         };
-        let err = run(&client, &drop_sql(&dep).unwrap()).await.unwrap_err();
+        let err = run(&client, &drop_sql(&dep, false).unwrap())
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("depend"), "{err:#}");
+        // With cascade the dependent view goes too, and the table with it.
+        client
+            .batch_execute(
+                "create table pgroove_ddl.casc (id int); \
+                 create view pgroove_ddl.casc_v as select id from pgroove_ddl.casc",
+            )
+            .await
+            .unwrap();
+        let casc = Target::Object {
+            schema: "pgroove_ddl".into(),
+            name: "casc".into(),
+            kind: ObjectKind::Table,
+        };
+        assert!(
+            run(&client, &drop_sql(&casc, false).unwrap())
+                .await
+                .is_err()
+        );
+        run(&client, &drop_sql(&casc, true).unwrap()).await.unwrap();
+        let left = names(
+            crate::catalog::objects(&client, "pgroove_ddl")
+                .await
+                .unwrap(),
+        );
+        assert!(!left.iter().any(|n| n.starts_with("casc")), "{left:?}");
         // Drop the dependents, then the table, then the rest, then the schema.
         for (name, kind) in [
             ("v 2", ObjectKind::View),
@@ -752,14 +860,16 @@ mod tests {
                 name: name.into(),
                 kind,
             };
-            let sql = drop_sql(&t).unwrap();
+            let sql = drop_sql(&t, false).unwrap();
             run(&client, &sql)
                 .await
                 .unwrap_or_else(|e| panic!("{sql}: {e:#}"));
         }
         // A schema that still holds objects is refused; once empty it renames and drops.
         let schema = Target::Schema("pgroove_ddl".into());
-        let err = run(&client, &drop_sql(&schema).unwrap()).await.unwrap_err();
+        let err = run(&client, &drop_sql(&schema, false).unwrap())
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("depend"), "{err:#}");
         client
             .batch_execute(
@@ -771,7 +881,9 @@ mod tests {
             .await
             .unwrap();
         let renamed = Target::Schema("pgroove_ddl2".into());
-        run(&client, &drop_sql(&renamed).unwrap()).await.unwrap();
+        run(&client, &drop_sql(&renamed, false).unwrap())
+            .await
+            .unwrap();
         let left = crate::catalog::schemas(&client).await.unwrap();
         assert!(
             !left.iter().any(|s| s.starts_with("pgroove_ddl")),
