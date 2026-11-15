@@ -75,6 +75,8 @@ pub struct GridPane {
     split: Entity<ResizableState>,
     editable: bool,
     edit_input: Entity<TextareaState>,
+    /// Read-only text area showing the value, so it can be selected and copied.
+    view_input: Entity<TextareaState>,
     _subs: Vec<Subscription>,
 }
 
@@ -98,6 +100,7 @@ impl GridPane {
                 .col_movable(false)
         });
         let edit_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Value"));
+        let view_input = cx.new(|cx| TextareaState::new(window, cx));
         let subs = vec![
             cx.subscribe_in(&grid, window, |this, _, ev: &TableEvent, window, cx| {
                 if let TableEvent::SelectCell(r, c) = ev {
@@ -106,6 +109,13 @@ impl GridPane {
                         .update(cx, |g, _| g.delegate_mut().cell_selected((*r, *c)));
                     this.selected = Some((r, c));
                     this.refresh_inspected(cx);
+                    let shown = this
+                        .inspected
+                        .as_ref()
+                        .and_then(|i| i.text.clone())
+                        .unwrap_or_default();
+                    this.view_input
+                        .update(cx, |i, cx| i.set_value(shown, window, cx));
                     if this.editable && this.inspected.as_ref().is_some_and(|i| i.can_edit) {
                         let text = this
                             .grid
@@ -141,6 +151,7 @@ impl GridPane {
             split: cx.new(|_| ResizableState::default()),
             editable: false,
             edit_input,
+            view_input,
             _subs: subs,
         }
     }
@@ -431,24 +442,26 @@ impl GridPane {
                     )
                 })
                 .when(!editable, |d| {
-                    d.child(
-                        div()
-                            .id("inspector-value")
+                    d.child(match text {
+                        // The text sits in a read-only text area: it can be selected with the
+                        // mouse and copied, which plain text cannot.
+                        Some(_) => div().flex_1().min_h_0().px_3().pb_2().child(
+                            Textarea::new(&self.view_input)
+                                .readonly(true)
+                                .bordered(false)
+                                .h_full()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_sm(),
+                        ),
+                        None => div()
                             .flex_1()
-                            .min_h_0()
                             .px_3()
                             .pb_2()
-                            .overflow_y_scroll()
-                            .font_family(theme.mono_font_family.clone())
+                            .italic()
                             .text_sm()
-                            .child(match text {
-                                Some(v) => div().child(v),
-                                None => div()
-                                    .italic()
-                                    .text_color(theme.muted_foreground)
-                                    .child("NULL"),
-                            }),
-                    )
+                            .text_color(theme.muted_foreground)
+                            .child("NULL"),
+                    })
                 }),
         )
     }
