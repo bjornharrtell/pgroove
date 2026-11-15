@@ -7,6 +7,7 @@ mod dbeaver_dialog;
 mod dialogs;
 mod grid_pane;
 mod mode;
+mod object_actions;
 mod palette;
 mod plan_view;
 mod profiles;

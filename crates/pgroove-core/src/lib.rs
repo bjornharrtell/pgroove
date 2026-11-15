@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod completion;
 pub mod connect;
 pub mod data;
+pub mod ddl;
 pub mod edit;
 pub mod explain;
 pub mod export;

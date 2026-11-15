@@ -14,6 +14,8 @@ use pgroove_core::catalog::{self, ObjectKind};
 use pgroove_core::data::TableRef;
 use pgroove_core::sqlgen;
 
+use crate::mode::ReadOnlyMode;
+use crate::object_actions::Subject;
 use crate::schema_tree::Row;
 use crate::sessions::{DbSession, SessionStatus};
 use crate::tabs::TabKind;
@@ -157,22 +159,43 @@ impl Workspace {
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_schema(sid, n.clone(), cx)),
                     )
-                    .context_menu(move |menu, _, _| {
+                    .context_menu(move |menu, _, cx| {
                         let (t, copy) = (refresh_this.clone(), copy_name.clone());
                         let open = refresh_this.clone();
-                        menu.item(PopupMenuItem::new("Open Tab Here").on_click(
-                            move |_, window, cx| {
-                                open.update(cx, |ws, cx| {
-                                    ws.open_tab_here(sid, window, cx);
-                                })
-                            },
-                        ))
-                        .item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
-                            t.update(cx, |ws, cx| ws.refresh_session(sid, cx))
-                        }))
-                        .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                        }))
+                        let editable = !cx.global::<ReadOnlyMode>().0;
+                        let (rename_this, drop_this) = (refresh_this.clone(), refresh_this.clone());
+                        let (rename_name, drop_name) = (copy_name.clone(), copy_name.clone());
+                        let menu = menu
+                            .item(PopupMenuItem::new("Open Tab Here").on_click(
+                                move |_, window, cx| {
+                                    open.update(cx, |ws, cx| {
+                                        ws.open_tab_here(sid, window, cx);
+                                    })
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
+                                t.update(cx, |ws, cx| ws.refresh_session(sid, cx))
+                            }))
+                            .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                            }));
+                        if !editable {
+                            return menu;
+                        }
+                        menu.separator()
+                            .item(
+                                PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                                    let subject = Subject::Schema(rename_name.clone());
+                                    rename_this.update(cx, |ws, cx| {
+                                        ws.rename_object(sid, subject, window, cx)
+                                    })
+                                }),
+                            )
+                            .item(PopupMenuItem::new("Drop…").on_click(move |_, window, cx| {
+                                let subject = Subject::Schema(drop_name.clone());
+                                drop_this
+                                    .update(cx, |ws, cx| ws.drop_object(sid, subject, window, cx))
+                            }))
                     })
                     .into_any_element()
             }
@@ -257,6 +280,7 @@ impl Workspace {
                     _ => false,
                 });
                 row.context_menu(move |menu, window, cx| {
+                    let editable = !cx.global::<ReadOnlyMode>().0;
                     let qualified = format!(
                         "{}.{}",
                         pgroove_core::data::pretty_ident(&s),
@@ -338,9 +362,32 @@ impl Workspace {
                     } else {
                         n.clone()
                     };
-                    menu.item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                    }))
+                    let menu =
+                        menu.item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                        }));
+                    if !editable {
+                        return menu;
+                    }
+                    let subject = Subject::Object {
+                        schema: s.clone(),
+                        name: n.clone(),
+                        kind,
+                    };
+                    let (rename_this, drop_this) = (ctx_this.clone(), ctx_this.clone());
+                    let (rename_subject, drop_subject) = (subject.clone(), subject);
+                    menu.separator()
+                        .item(
+                            PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                                let subject = rename_subject.clone();
+                                rename_this
+                                    .update(cx, |ws, cx| ws.rename_object(sid, subject, window, cx))
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Drop…").on_click(move |_, window, cx| {
+                            let subject = drop_subject.clone();
+                            drop_this.update(cx, |ws, cx| ws.drop_object(sid, subject, window, cx))
+                        }))
                 })
                 .into_any_element()
             }

@@ -31,7 +31,10 @@ Requires PostgreSQL 13 or newer on the server.
   sizes and reconstructed DDL.
 - **Editing:** add, duplicate, change and delete rows in any ordinary table, including tables without a primary key (rows are then matched by physical position and version, and a row changed in the meantime is refused). Edits are staged, you review the generated SQL, and it is applied atomically.
   Writes are blocked by default through a server-side read-only session; switch it off in the
-  title bar to edit.
+  title bar to edit. In editable mode the tree's context menus also offer **Rename…** and
+  **Drop…** for schemas, tables, views, sequences, types and functions. A drop shows its
+  statement first and never cascades: if something depends on the object, the server refuses and
+  says what.
 - **Monitoring:** sessions (cancel and terminate), blocking locks, `pg_stat_statements`,
   database and table sizes, replication, settings.
 - **Desktop integration:** follows the system light or dark theme by default (Catppuccin Latte and Mocha), with the appearance and theme set in the settings tab
