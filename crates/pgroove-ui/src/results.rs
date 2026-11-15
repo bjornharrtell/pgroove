@@ -507,8 +507,12 @@ impl ResultsTable {
                 }),
             )
             .on_mouse_move(cx.listener(move |state, ev: &MouseMoveEvent, _, cx| {
-                if ev.pressed_button == Some(MouseButton::Left) {
-                    state.delegate_mut().selection.drag_to((row_ix, col_ix));
+                if ev.pressed_button == Some(MouseButton::Left)
+                    && state.delegate_mut().selection.drag_to((row_ix, col_ix))
+                {
+                    // The cell under the pointer becomes the active one (shown in the
+                    // inspector), not the one the drag started on.
+                    state.set_selected_cell(row_ix, col_ix, cx);
                     cx.notify();
                 }
             }))
@@ -736,7 +740,7 @@ mod tests {
         }));
         assert_eq!(t.copy_text(false), None);
         t.press((0, 0), Mods::default());
-        t.selection_mut().drag_to((1, 1));
+        assert!(t.selection_mut().drag_to((1, 1)));
         t.selection_mut().release();
         assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\t\n".into(), 4)));
         // The click's own SelectCell keeps the marked block; a keyboard move collapses it.

@@ -64,6 +64,8 @@ pub struct CellSelection {
     anchor: Option<(usize, usize)>,
     /// A drag is in progress: moving over cells reshapes the last block.
     dragging: bool,
+    /// The cell the drag has reached, i.e. the end of the block opposite the anchor.
+    cursor: Option<(usize, usize)>,
 }
 
 impl CellSelection {
@@ -116,6 +118,7 @@ impl CellSelection {
     /// A mouse press on a cell: starts a block (and a drag).
     pub fn press(&mut self, cell: (usize, usize), mods: Mods) {
         self.dragging = true;
+        self.cursor = Some(cell);
         match (mods.extend, self.anchor) {
             (true, Some(anchor)) => {
                 let block = Rect::between(anchor, cell);
@@ -141,14 +144,22 @@ impl CellSelection {
         }
     }
 
-    /// The pointer moved over a cell while the button is down.
-    pub fn drag_to(&mut self, cell: (usize, usize)) {
-        if !self.dragging {
-            return;
+    /// Whether a drag is in progress.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// The pointer moved over a cell while the button is down. Returns true when that is a
+    /// new cell for the drag, i.e. the active cell should now be this one.
+    pub fn drag_to(&mut self, cell: (usize, usize)) -> bool {
+        if !self.dragging || self.cursor == Some(cell) {
+            return false;
         }
+        self.cursor = Some(cell);
         if let (Some(anchor), Some(last)) = (self.anchor, self.ranges.last_mut()) {
             *last = Rect::between(anchor, cell);
         }
+        true
     }
 
     pub fn release(&mut self) {
@@ -282,10 +293,12 @@ mod tests {
     fn click_drag_and_release() {
         let mut s = CellSelection::default();
         assert_eq!(s.cell_count(), 0);
-        s.drag_to((3, 3));
+        assert!(!s.drag_to((3, 3)));
         assert_eq!(s.cell_count(), 0, "no drag without a press");
         s.press((1, 1), PLAIN);
-        s.drag_to((3, 2));
+        assert!(!s.drag_to((1, 1)), "still on the pressed cell");
+        assert!(s.drag_to((3, 2)) && !s.drag_to((3, 2)));
+        assert!(s.is_dragging());
         assert!(s.contains(2, 2) && s.contains(1, 1) && s.contains(3, 2) && !s.contains(0, 0));
         assert_eq!(s.cell_count(), 6);
         s.release();
