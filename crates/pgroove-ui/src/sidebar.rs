@@ -594,14 +594,26 @@ impl Workspace {
             row = row.font_weight(FontWeight::MEDIUM);
         }
         row.context_menu(move |menu, _, _| {
-            let this = menu_this.clone();
-            // A database that is not open has no tree to refresh.
+            let (open_this, refresh_this) = (menu_this.clone(), menu_this.clone());
+            // A database that is not open has no connection to run a query on, and no tree to
+            // refresh.
             menu.item(
+                PopupMenuItem::new("Open query")
+                    .disabled(session.is_none())
+                    .on_click(move |_, window, cx| {
+                        if let Some(id) = session {
+                            open_this.update(cx, |ws, cx| {
+                                ws.open_tab_here(id, window, cx);
+                            })
+                        }
+                    }),
+            )
+            .item(
                 PopupMenuItem::new("Refresh")
                     .disabled(session.is_none())
                     .on_click(move |_, _, cx| {
                         if let Some(id) = session {
-                            this.update(cx, |ws, cx| ws.refresh_session(id, cx))
+                            refresh_this.update(cx, |ws, cx| ws.refresh_session(id, cx))
                         }
                     }),
             )
