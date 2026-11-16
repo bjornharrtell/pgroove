@@ -17,15 +17,17 @@ pub enum Load<T> {
 pub enum Category {
     Tables,
     Views,
+    Indexes,
     Sequences,
     Types,
     Functions,
 }
 
 impl Category {
-    pub const ORDER: [Category; 5] = [
+    pub const ORDER: [Category; 6] = [
         Category::Tables,
         Category::Views,
+        Category::Indexes,
         Category::Sequences,
         Category::Types,
         Category::Functions,
@@ -38,6 +40,7 @@ impl Category {
             }
             ObjectKind::View | ObjectKind::MaterializedView => Category::Views,
             ObjectKind::Sequence => Category::Sequences,
+            ObjectKind::Index => Category::Indexes,
             ObjectKind::EnumType | ObjectKind::CompositeType | ObjectKind::DomainType => {
                 Category::Types
             }
@@ -51,6 +54,7 @@ impl Category {
         match self {
             Category::Tables => "Tables",
             Category::Views => "Views",
+            Category::Indexes => "Indexes",
             Category::Sequences => "Sequences",
             Category::Types => "Types",
             Category::Functions => "Functions",
@@ -81,6 +85,8 @@ pub enum Row {
         kind: ObjectKind,
         /// Estimated size in bytes, for relations the catalog knows the size of.
         size: Option<i64>,
+        /// For an index, the table it is on.
+        on_table: Option<String>,
     },
     Message(String),
     ExtensionsHeader {
@@ -230,6 +236,7 @@ impl SchemaTree {
                             name: o.name.clone(),
                             kind: o.kind,
                             size: o.size,
+                            on_table: o.on_table.clone(),
                         });
                     }
                 }
@@ -331,6 +338,7 @@ impl SchemaTree {
                                 name: o.name.clone(),
                                 kind: o.kind,
                                 size: o.size,
+                                on_table: o.on_table.clone(),
                             }));
                         }
                     }
@@ -370,6 +378,7 @@ mod tests {
             name: name.into(),
             kind: ObjectKind::Table,
             size: None,
+            on_table: None,
         }
     }
 
@@ -426,6 +435,7 @@ mod tests {
             name: name.into(),
             kind,
             size: None,
+            on_table: None,
         };
         t.set_objects(
             "s",
@@ -433,6 +443,7 @@ mod tests {
                 o("t", ObjectKind::Table),
                 o("v", ObjectKind::View),
                 o("m", ObjectKind::MaterializedView),
+                o("t_pkey", ObjectKind::Index),
                 o("q", ObjectKind::Sequence),
                 o("e", ObjectKind::EnumType),
                 o("f(a integer)", ObjectKind::Function),
@@ -457,16 +468,17 @@ mod tests {
             [
                 (Category::Tables, 1, true),
                 (Category::Views, 2, false),
+                (Category::Indexes, 1, false),
                 (Category::Sequences, 1, false),
                 (Category::Types, 1, false),
                 (Category::Functions, 2, false),
             ]
         );
-        assert_eq!(rows.len(), 1 + 5 + 1, "only Tables lists its object");
+        assert_eq!(rows.len(), 1 + 6 + 1, "only Tables lists its object");
         t.toggle_category("s", Category::Views);
         t.toggle_category("s", Category::Tables);
         let rows = t.rows();
-        assert_eq!(rows.len(), 1 + 5 + 2, "Views open, Tables closed");
+        assert_eq!(rows.len(), 1 + 6 + 2, "Views open, Tables closed");
         assert!(
             rows.iter()
                 .any(|r| matches!(r, Row::Object { name, .. } if name == "m"))
@@ -489,11 +501,119 @@ mod tests {
     }
 
     #[test]
+    fn indexes_form_their_own_group_after_views() {
+        // Indexes sit between Views and Sequences, whatever order the catalog lists them in.
+        let order: Vec<_> = Category::ORDER.iter().map(|c| c.label()).collect();
+        assert_eq!(
+            order,
+            [
+                "Tables",
+                "Views",
+                "Indexes",
+                "Sequences",
+                "Types",
+                "Functions"
+            ]
+        );
+        assert_eq!(Category::of(ObjectKind::Index), Category::Indexes);
+        let mut t = SchemaTree::default();
+        t.set_schemas(Ok(vec!["s".into()]));
+        t.toggle("s");
+        let index = |name: &str, table: &str, size| SchemaObject {
+            name: name.into(),
+            kind: ObjectKind::Index,
+            size,
+            on_table: Some(table.into()),
+        };
+        t.set_objects(
+            "s",
+            Ok(vec![
+                index("orders_pkey", "orders", Some(16384)),
+                index("orders_ts", "orders", None),
+            ]),
+        );
+        // Collapsed like the other groups, with a count and no rows until opened.
+        assert!(matches!(
+            &t.rows()[1],
+            Row::Category {
+                category: Category::Indexes,
+                expanded: false,
+                count: 2,
+                ..
+            }
+        ));
+        assert_eq!(t.rows().len(), 2);
+        t.toggle_category("s", Category::Indexes);
+        let rows = t.rows();
+        assert_eq!(rows.len(), 4);
+        // Each row keeps its size and the table it is on, for the size column and the tooltip.
+        assert_eq!(
+            rows[2],
+            Row::Object {
+                schema: "s".into(),
+                name: "orders_pkey".into(),
+                kind: ObjectKind::Index,
+                size: Some(16384),
+                on_table: Some("orders".into()),
+            }
+        );
+        assert!(matches!(
+            &rows[3],
+            Row::Object { size: None, on_table: Some(t), .. } if t == "orders"
+        ));
+    }
+
+    #[test]
+    fn searching_finds_indexes_by_name_under_their_group() {
+        let mut t = SchemaTree::default();
+        t.set_schemas(Ok(vec!["public".into()]));
+        let object = |name: &str, kind, on_table: Option<&str>| {
+            (
+                "public".to_string(),
+                SchemaObject {
+                    name: name.into(),
+                    kind,
+                    size: Some(8192),
+                    on_table: on_table.map(String::from),
+                },
+            )
+        };
+        t.set_filter("orders");
+        t.set_all_objects(Ok(vec![
+            object("orders", ObjectKind::Table, None),
+            object("orders_pkey", ObjectKind::Index, Some("orders")),
+            object("customers_pkey", ObjectKind::Index, Some("customers")),
+        ]));
+        let rows = t.rows();
+        let cats: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Category {
+                    category, count, ..
+                } => Some((*category, *count)),
+                _ => None,
+            })
+            .collect();
+        // The index whose own name matches is listed under Indexes, after Tables; one that is
+        // only on another table is not.
+        assert_eq!(cats, [(Category::Tables, 1), (Category::Indexes, 1)]);
+        assert!(rows.iter().any(
+            |r| matches!(r, Row::Object { name, kind: ObjectKind::Index, .. } if name == "orders_pkey")
+        ));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, Row::Object { name, .. } if name == "customers_pkey"))
+        );
+    }
+
+    #[test]
     fn relation_sizes_reach_the_rows() {
         let sized = |name: &str, kind, size| SchemaObject {
             name: name.into(),
             kind,
             size,
+            on_table: None,
         };
         let objects = || {
             vec![
@@ -536,6 +656,7 @@ mod tests {
                     name: n.into(),
                     kind,
                     size: None,
+                    on_table: None,
                 },
             )
         };
@@ -618,6 +739,7 @@ mod tests {
                         name: format!("t{i:04}"),
                         kind: ObjectKind::Table,
                         size: None,
+                        on_table: None,
                     },
                 )
             })

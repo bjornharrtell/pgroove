@@ -11,6 +11,8 @@ pub enum ObjectKind {
     View,
     MaterializedView,
     Sequence,
+    /// A plain or partitioned index (`pg_class.relkind` `i` or `I`).
+    Index,
     Function,
     Procedure,
     Aggregate,
@@ -30,6 +32,7 @@ impl ObjectKind {
             "v" => Self::View,
             "m" => Self::MaterializedView,
             "S" => Self::Sequence,
+            "i" | "I" => Self::Index,
             "F" => Self::Function,
             "P" => Self::Procedure,
             "A" => Self::Aggregate,
@@ -48,6 +51,7 @@ impl ObjectKind {
             Self::View => "view",
             Self::MaterializedView => "materialized view",
             Self::Sequence => "sequence",
+            Self::Index => "index",
             Self::Function => "function",
             Self::Procedure => "procedure",
             Self::Aggregate => "aggregate",
@@ -79,6 +83,8 @@ pub struct SchemaObject {
     /// This is cheap to fetch: it costs no filesystem access, unlike
     /// `pg_relation_size`.
     pub size: Option<i64>,
+    /// For an index, the table (or materialized view) it is on; `None` for everything else.
+    pub on_table: Option<String>,
 }
 
 /// A byte count as humans read it: whole bytes below 1 kB, then one decimal below
@@ -129,21 +135,29 @@ pub async fn schemas(client: &Client) -> Result<Vec<String>> {
     Ok(rows.iter().map(|r| r.get(0)).collect())
 }
 
-/// SQL listing objects as `(schema, name, kind, size)`; `schema_cond` restricts the
+/// SQL listing objects as `(schema, name, kind, size, on_table)`; `schema_cond` restricts the
 /// schemas and may use `n.nspname` and the parameter `$1`. The size is the page
 /// count times the block size, an estimate the catalog already holds, so it costs
 /// no filesystem access per relation.
 fn objects_sql(schema_cond: &str) -> String {
     format!(
-        "select nsp, name, kind, size from ( \
+        "select nsp, name, kind, size, on_table from ( \
            select n.nspname::text as nsp, c.relname::text as name, c.relkind::text as kind, 0 as grp, \
-                  c.relpages::int8 * current_setting('block_size')::int8 as size \
+                  c.relpages::int8 * current_setting('block_size')::int8 as size, \
+                  null::text as on_table \
            from pg_class c join pg_namespace n on n.oid = c.relnamespace \
            where {schema_cond} and c.relkind in ('r','p','f','v','m','S') \
              and not c.relispartition \
            union all \
+           select n.nspname::text, c.relname::text, c.relkind::text, 3, \
+                  c.relpages::int8 * current_setting('block_size')::int8, t.relname::text \
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+                join pg_index i on i.indexrelid = c.oid join pg_class t on t.oid = i.indrelid \
+           where {schema_cond} and c.relkind in ('i','I') and not c.relispartition \
+           union all \
            select n.nspname::text, t.typname::text, \
-                  case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1, null::int8 \
+                  case t.typtype when 'e' then 'E' when 'd' then 'D' else 'C' end, 1, null::int8, \
+                  null::text \
            from pg_type t join pg_namespace n on n.oid = t.typnamespace \
            where {schema_cond} \
              and (t.typtype in ('e','d') or (t.typtype = 'c' and exists \
@@ -151,7 +165,8 @@ fn objects_sql(schema_cond: &str) -> String {
            union all \
            select n.nspname::text, \
                   p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')', \
-                  case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2, null::int8 \
+                  case p.prokind when 'p' then 'P' when 'a' then 'A' else 'F' end, 2, null::int8, \
+                  null::text \
            from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
            where {schema_cond} and p.prokind in ('f','p','a') \
              and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e') \
@@ -170,6 +185,7 @@ fn to_objects(rows: &[tokio_postgres::Row]) -> Vec<(String, SchemaObject)> {
                     kind,
                     // A page count of zero means "no estimate yet", not "no bytes".
                     size: r.get::<_, Option<i64>>(3).filter(|b| *b > 0),
+                    on_table: r.get(4),
                 },
             ))
         })
@@ -270,6 +286,8 @@ mod tests {
             ("v", ObjectKind::View),
             ("m", ObjectKind::MaterializedView),
             ("S", ObjectKind::Sequence),
+            ("i", ObjectKind::Index),
+            ("I", ObjectKind::Index),
             ("F", ObjectKind::Function),
             ("P", ObjectKind::Procedure),
             ("A", ObjectKind::Aggregate),
@@ -280,7 +298,14 @@ mod tests {
             assert_eq!(ObjectKind::from_relkind(c), Some(k));
             assert!(!k.label().is_empty());
         }
-        assert_eq!(ObjectKind::from_relkind("i"), None);
+        // Codes that are not objects of the tree: a composite type's relation, a toast table.
+        for other in ["c", "t", "", "x"] {
+            assert_eq!(ObjectKind::from_relkind(other), None, "{other:?}");
+        }
+        assert!(
+            !ObjectKind::Index.is_relation(),
+            "an index holds no rows to browse"
+        );
         assert!(ObjectKind::View.is_relation());
         assert!(!ObjectKind::Sequence.is_relation());
         assert!(!ObjectKind::Function.is_relation());
@@ -316,6 +341,12 @@ mod tests {
                  create procedure pgroove_k.noop() language sql as ''; \
                  create aggregate pgroove_k.mysum(int) (sfunc = int4pl, stype = int, initcond = '0'); \
                  create view pgroove_k.v as select id from pgroove_k.t; \
+                 create unique index t_id_key on pgroove_k.t (id); \
+                 create index t_big on pgroove_k.t (id) where id > 500; \
+                 create materialized view pgroove_k.m as select id from pgroove_k.t; \
+                 create index m_id on pgroove_k.m (id); \
+                 create table pgroove_k.p (id int primary key) partition by range (id); \
+                 create table pgroove_k.p1 partition of pgroove_k.p for values from (0) to (10); \
                  insert into pgroove_k.t select generate_series(1, 1000); \
                  analyze pgroove_k.t",
             )
@@ -326,6 +357,8 @@ mod tests {
         assert_eq!(
             got,
             [
+                ("m", ObjectKind::MaterializedView),
+                ("p", ObjectKind::PartitionedTable),
                 ("t", ObjectKind::Table),
                 ("v", ObjectKind::View),
                 ("mood", ObjectKind::EnumType),
@@ -334,7 +367,32 @@ mod tests {
                 ("add(a integer, b integer)", ObjectKind::Function),
                 ("mysum(integer)", ObjectKind::Aggregate),
                 ("noop()", ObjectKind::Procedure),
+                // Indexes come last. Partition `p1` is left out, and so is its index.
+                ("m_id", ObjectKind::Index),
+                ("p_pkey", ObjectKind::Index),
+                ("t_big", ObjectKind::Index),
+                ("t_id_key", ObjectKind::Index),
             ]
+        );
+        // Each index names the table (or materialized view) it is on.
+        let on = |name: &str| {
+            objs.iter()
+                .find(|o| o.name == name)
+                .unwrap()
+                .on_table
+                .clone()
+        };
+        assert_eq!(on("t_id_key").as_deref(), Some("t"));
+        assert_eq!(on("t_big").as_deref(), Some("t"));
+        assert_eq!(on("m_id").as_deref(), Some("m"));
+        assert_eq!(on("p_pkey").as_deref(), Some("p"));
+        assert_eq!(on("t"), None, "only an index has a table it is on");
+        // An index has a catalog size estimate once it has pages; a table with data does.
+        let idx_size = |name: &str| objs.iter().find(|o| o.name == name).unwrap().size;
+        assert!(
+            idx_size("t_id_key").is_some_and(|b| b >= 8192),
+            "{:?}",
+            idx_size("t_id_key")
         );
         // Only relations carry a size, and a table with pages has a catalog estimate.
         let size = |name: &str| objs.iter().find(|o| o.name == name).unwrap().size;

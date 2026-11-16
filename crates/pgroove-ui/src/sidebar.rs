@@ -69,10 +69,15 @@ fn size_text(size: Option<i64>) -> String {
 }
 
 /// Tooltip of an object row: its kind, plus the size when the catalog has one.
-fn row_tip(kind: ObjectKind, size: Option<i64>) -> String {
-    match size.map(catalog::format_size) {
-        Some(text) => format!("{} · about {text}", kind.label()),
+fn row_tip(kind: ObjectKind, size: Option<i64>, on_table: Option<&str>) -> String {
+    // An index says what it is on: "index on orders".
+    let what = match on_table {
+        Some(table) => format!("{} on {table}", kind.label()),
         None => kind.label().to_string(),
+    };
+    match size.map(catalog::format_size) {
+        Some(text) => format!("{what} · about {text}"),
+        None => what,
     }
 }
 
@@ -233,10 +238,12 @@ impl Workspace {
                 name,
                 kind,
                 size,
+                on_table,
             } => {
                 let icon = match kind {
                     ObjectKind::View | ObjectKind::MaterializedView => IconName::Eye,
                     ObjectKind::Sequence => IconName::Hash,
+                    ObjectKind::Index => IconName::ListTree,
                     ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Aggregate => {
                         IconName::Braces
                     }
@@ -257,7 +264,9 @@ impl Workspace {
                     // The name yields space so the trailing size sits at the right edge.
                     .child(div().flex_1().truncate().child(name.clone()))
                     .child(div().text_xs().text_color(muted).child(size_text(size)))
-                    .tooltip(move |window, cx| Tooltip::new(row_tip(kind, size)).build(window, cx));
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(row_tip(kind, size, on_table.as_deref())).build(window, cx)
+                    });
                 let row = if kind.is_relation() {
                     let table = TableRef::new(schema.clone(), name.clone());
                     row.cursor_pointer()
@@ -1052,13 +1061,24 @@ mod tests {
         assert_eq!(size_text(Some(1536)), "1.5 kB");
         assert_eq!(size_text(None), "", "no estimate, nothing to show");
         assert_eq!(
-            row_tip(pgroove_core::catalog::ObjectKind::Table, Some(1536)),
+            row_tip(pgroove_core::catalog::ObjectKind::Table, Some(1536), None),
             "table · about 1.5 kB"
         );
         assert_eq!(
-            row_tip(pgroove_core::catalog::ObjectKind::View, None),
+            row_tip(pgroove_core::catalog::ObjectKind::View, None, None),
             "view"
         );
+    }
+
+    #[test]
+    fn an_index_row_says_what_it_is_on() {
+        use pgroove_core::catalog::ObjectKind::Index;
+        assert_eq!(
+            row_tip(Index, Some(16384), Some("orders")),
+            "index on orders · about 16 kB"
+        );
+        // An index the catalog has no size for yet still names its table.
+        assert_eq!(row_tip(Index, None, Some("orders")), "index on orders");
     }
 
     #[test]

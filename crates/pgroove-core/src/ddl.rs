@@ -134,6 +134,7 @@ fn keyword(kind: ObjectKind) -> &'static str {
         ObjectKind::View => "view",
         ObjectKind::MaterializedView => "materialized view",
         ObjectKind::Sequence => "sequence",
+        ObjectKind::Index => "index",
         ObjectKind::Function => "function",
         ObjectKind::Procedure => "procedure",
         ObjectKind::Aggregate => "aggregate",
@@ -317,6 +318,7 @@ mod tests {
             r#"drop materialized view "s"."t""#
         );
         assert_eq!(sql(ObjectKind::Sequence), r#"drop sequence "s"."t""#);
+        assert_eq!(sql(ObjectKind::Index), r#"drop index "s"."t""#);
         assert_eq!(sql(ObjectKind::EnumType), r#"drop type "s"."t""#);
         assert_eq!(sql(ObjectKind::CompositeType), r#"drop type "s"."t""#);
         assert_eq!(sql(ObjectKind::DomainType), r#"drop domain "s"."t""#);
@@ -329,6 +331,10 @@ mod tests {
     #[test]
     fn renames_each_kind_with_its_keyword() {
         let sql = |k| rename_sql(&object(k), "n").unwrap();
+        assert_eq!(
+            sql(ObjectKind::Index),
+            r#"alter index "s"."t" rename to "n""#
+        );
         assert_eq!(
             sql(ObjectKind::Table),
             r#"alter table "s"."t" rename to "n""#
@@ -466,6 +472,7 @@ mod tests {
                 View,
                 MaterializedView,
                 Sequence,
+                Index,
                 Function,
                 Procedure,
                 Aggregate,
@@ -549,6 +556,10 @@ mod tests {
         assert_eq!(sql(Maintenance::Truncate, ObjectKind::View), None);
         assert_eq!(sql(Maintenance::Vacuum, ObjectKind::ForeignTable), None);
         assert_eq!(sql(Maintenance::Analyze, ObjectKind::Sequence), None);
+        // An index is analyzed and vacuumed with its table, not by itself.
+        for op in Maintenance::ALL {
+            assert_eq!(sql(op, ObjectKind::Index), None);
+        }
         assert_eq!(
             maintenance_sql(Maintenance::Analyze, &Target::Schema("s".into()), false),
             None
@@ -686,6 +697,7 @@ mod tests {
                  create type pgroove_ddl.mood as enum ('a'); \
                  create type pgroove_ddl.pair as (a int, b int); \
                  create domain pgroove_ddl.posint as int; \
+                 create index ix on pgroove_ddl.t (id); \
                  create function pgroove_ddl.add(a int, b int) returns int language sql as 'select a + b'; \
                  create function pgroove_ddl.add(a text) returns text language sql as 'select a'; \
                  create procedure pgroove_ddl.noop() language sql as ''; \
@@ -708,6 +720,7 @@ mod tests {
             ("mood", ObjectKind::EnumType),
             ("pair", ObjectKind::CompositeType),
             ("posint", ObjectKind::DomainType),
+            ("ix", ObjectKind::Index),
         ] {
             let target = Target::Object {
                 schema: "pgroove_ddl".into(),
@@ -724,7 +737,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        for old in ["t", "p", "v", "m", "s", "mood", "pair", "posint"] {
+        for old in ["t", "p", "v", "m", "s", "mood", "pair", "posint", "ix"] {
             assert!(
                 !listed.contains(&old.to_string()),
                 "{old} should be renamed"
@@ -844,6 +857,20 @@ mod tests {
                 .unwrap(),
         );
         assert!(!left.iter().any(|n| n.starts_with("casc")), "{left:?}");
+        // An index drops by itself, and the table keeps working without it.
+        let ix = Target::Object {
+            schema: "pgroove_ddl".into(),
+            name: "ix 2".into(),
+            kind: ObjectKind::Index,
+        };
+        run(&client, &drop_sql(&ix, false).unwrap()).await.unwrap();
+        let left = names(
+            crate::catalog::objects(&client, "pgroove_ddl")
+                .await
+                .unwrap(),
+        );
+        assert!(!left.contains(&"ix 2".to_string()), "{left:?}");
+        assert!(left.contains(&"t 2".to_string()));
         // Drop the dependents, then the table, then the rest, then the schema.
         for (name, kind) in [
             ("v 2", ObjectKind::View),
