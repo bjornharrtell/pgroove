@@ -490,8 +490,11 @@ impl Render for GridPane {
         let inspector = self.render_inspector(cx);
         let show_inspector = inspector.is_some();
         let grid = self.grid.clone();
-        let table =
-            DataTable::new(&self.grid).with_size(gpui_kit::component::Size::Size(row_height));
+        // No frame of its own: the panes around it already draw the edges, and a framed table
+        // doubles the sidebar's border and rounds its corners.
+        let table = DataTable::new(&self.grid)
+            .bordered(false)
+            .with_size(gpui_kit::component::Size::Size(row_height));
         div()
             .size_full()
             .key_context("ResultGrid")
