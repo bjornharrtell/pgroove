@@ -468,6 +468,7 @@ impl Workspace {
             .any(|s| s.profile.name == p.name && s.client.is_some());
         let (pc, pe, pd) = (p.clone(), p.clone(), p.name.clone());
         let hover = theme.sidebar_accent;
+        let (menu_this, menu_name) = (cx.entity(), p.name.clone());
         self.tree_row(("conn", i), 0, cx)
             .group("conn-row")
             .gap_1()
@@ -534,6 +535,13 @@ impl Workspace {
                     this.open_session(pc.clone(), cx);
                 }
             }))
+            .context_menu(move |menu, _, _| {
+                let (this, name) = (menu_this.clone(), menu_name.clone());
+                // Nothing to refresh until a database of this connection is open.
+                menu.item(PopupMenuItem::new("Refresh").disabled(!connected).on_click(
+                    move |_, _, cx| this.update(cx, |ws, cx| ws.refresh_connection(&name, cx)),
+                ))
+            })
             .into_any_element()
     }
 
@@ -548,6 +556,7 @@ impl Workspace {
         let hover = theme.sidebar_accent;
         let open = session.is_some();
         let name = profile.database.clone();
+        let menu_this = cx.entity();
         let mut row = self
             .tree_row(("database", i), 1, cx)
             .cursor_pointer()
@@ -584,7 +593,20 @@ impl Workspace {
         if open {
             row = row.font_weight(FontWeight::MEDIUM);
         }
-        row.into_any_element()
+        row.context_menu(move |menu, _, _| {
+            let this = menu_this.clone();
+            // A database that is not open has no tree to refresh.
+            menu.item(
+                PopupMenuItem::new("Refresh")
+                    .disabled(session.is_none())
+                    .on_click(move |_, _, cx| {
+                        if let Some(id) = session {
+                            this.update(cx, |ws, cx| ws.refresh_session(id, cx))
+                        }
+                    }),
+            )
+        })
+        .into_any_element()
     }
 
     /// The rows of the sidebar tree, top to bottom.

@@ -30,6 +30,16 @@ impl SessionStatus {
     }
 }
 
+/// The ids of the connected sessions of the connection called `name`, from `(id, connection
+/// name, connected)` triples: sessions still connecting or failed have nothing to refresh.
+pub(crate) fn ready_ids_of(sessions: &[(usize, &str, bool)], name: &str) -> Vec<usize> {
+    sessions
+        .iter()
+        .filter(|(_, n, ready)| *ready && *n == name)
+        .map(|(id, _, _)| *id)
+        .collect()
+}
+
 /// One open database: its own connection, schema tree and completion data.
 pub(crate) struct DbSession {
     pub(crate) id: usize,
@@ -539,6 +549,19 @@ impl Workspace {
         }
     }
 
+    /// Refreshes every open database of one saved connection.
+    pub(crate) fn refresh_connection(&mut self, name: &str, cx: &mut Context<Self>) {
+        let sessions: Vec<(usize, &str, bool)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.id, s.profile.name.as_str(), s.client.is_some()))
+            .collect();
+        let ids = ready_ids_of(&sessions, name);
+        for id in ids {
+            self.refresh_session(id, cx);
+        }
+    }
+
     pub(crate) fn toggle_schema(&mut self, sid: usize, schema: String, cx: &mut Context<Self>) {
         let fetch = self
             .session_mut(sid)
@@ -548,5 +571,29 @@ impl Workspace {
         }
         self.save_session(cx);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ready_ids_of;
+
+    #[test]
+    fn a_connection_refreshes_only_its_own_connected_databases() {
+        // (id, connection, connected): two databases of `prod` are open, one still connecting.
+        let sessions = [
+            (1, "prod", true),
+            (2, "test", true),
+            (3, "prod", true),
+            (4, "prod", false),
+        ];
+        assert_eq!(ready_ids_of(&sessions, "prod"), [1, 3]);
+        assert_eq!(ready_ids_of(&sessions, "test"), [2]);
+        // Nothing open, or an unknown name, refreshes nothing.
+        assert!(ready_ids_of(&sessions, "other").is_empty());
+        assert!(ready_ids_of(&[], "prod").is_empty());
+        // Names match exactly, not by prefix or case.
+        assert!(ready_ids_of(&sessions, "pro").is_empty());
+        assert!(ready_ids_of(&sessions, "Prod").is_empty());
     }
 }
