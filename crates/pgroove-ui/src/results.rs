@@ -743,7 +743,7 @@ mod tests {
         t.press((0, 0), Mods::default());
         assert!(t.selection_mut().drag_to((1, 1)));
         t.selection_mut().release();
-        assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\t\n".into(), 4)));
+        assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\tNULL\n".into(), 4)));
         // The click's own SelectCell keeps the marked block; a keyboard move collapses it.
         // The kit's column index counts the row-number gutter.
         assert_eq!(t.cell_selected((1, 2)), (1, 1));

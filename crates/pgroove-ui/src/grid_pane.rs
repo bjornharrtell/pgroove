@@ -208,7 +208,12 @@ impl GridPane {
             let t = self.grid.read(cx).delegate();
             t.copy_text(headers).or_else(|| {
                 let (r, c) = self.selected?;
-                t.cell(r, c).map(|v| (v.to_string(), 1))
+                Some((
+                    t.cell(r, c)
+                        .unwrap_or(crate::selection::NULL_TEXT)
+                        .to_string(),
+                    1,
+                ))
             })
         };
         if let Some((text, count)) = copied {
@@ -383,12 +388,14 @@ impl GridPane {
                                 .tooltip("Copy value")
                                 .on_click(move |_, window, cx| {
                                     // Read at click time; the inspector only holds a preview.
-                                    let value =
-                                        grid.read(cx).delegate().cell(r, c).map(str::to_string);
-                                    if let Some(v) = value {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(v));
-                                        window.push_notification("Copied value", cx);
-                                    }
+                                    let value = grid
+                                        .read(cx)
+                                        .delegate()
+                                        .cell(r, c)
+                                        .unwrap_or(crate::selection::NULL_TEXT)
+                                        .to_string();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(value));
+                                    window.push_notification("Copied value", cx);
                                 }),
                         ),
                 )

@@ -253,7 +253,7 @@ impl CellSelection {
                 .iter()
                 .map(|c| {
                     if self.contains(row, *c) {
-                        tsv_field(cell(row, *c).unwrap_or(""))
+                        tsv_field(cell(row, *c).unwrap_or(NULL_TEXT))
                     } else {
                         String::new()
                     }
@@ -265,6 +265,10 @@ impl CellSelection {
         out
     }
 }
+
+/// How a SQL NULL is written when cells are copied: the literal word, so it can be told
+/// apart from an empty string.
+pub const NULL_TEXT: &str = "NULL";
 
 /// Quotes a field the way spreadsheets expect when it holds a tab, line break or quote.
 fn tsv_field(v: &str) -> String {
@@ -425,5 +429,10 @@ mod tests {
         s.release();
         assert_eq!(s.to_tsv(cell, &names, false), "a\t\n\ti\n");
         assert_eq!(s.cell_count(), 2);
+        // A NULL is copied as the word, not as an empty field.
+        s.clear();
+        s.press((0, 2), PLAIN);
+        s.release();
+        assert_eq!(s.to_tsv(cell, &names, false), "NULL\n");
     }
 }
