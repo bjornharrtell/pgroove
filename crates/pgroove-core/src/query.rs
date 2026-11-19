@@ -277,7 +277,7 @@ async fn run_one(
 /// Rewrites the cells of geometry and geography columns from hex EWKB to EWKT. A cell that
 /// does not decode (cut short by the cell size limit, over the decode cap, or not EWKB)
 /// keeps the text the server sent.
-fn decode_geometries(set: &mut ResultSet) {
+pub(crate) fn decode_geometries(set: &mut ResultSet) {
     for (col, ty) in set.types.iter().enumerate() {
         if !crate::wkb::is_geometry_type(ty) {
             continue;

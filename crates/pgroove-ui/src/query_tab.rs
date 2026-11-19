@@ -11,9 +11,11 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use pgroove_core::cursor::{MAX_LOADED_ROWS, RowCursor};
 use pgroove_core::explain::Plan;
 use pgroove_core::history::{self, History, HistoryEntry, Snippets};
-use pgroove_core::query::{self, QueryError, QueryOutput};
+use pgroove_core::query::{self, QueryError, QueryOutput, ResultSet};
+use pgroove_core::secrets::SecretStore;
 use pgroove_core::sqlsplit::RunScope;
 use pgroove_core::structure::format_bytes;
 use tokio::runtime::Runtime;
@@ -22,6 +24,28 @@ use crate::grid_pane::GridPane;
 use crate::sql_completion::{SharedIndex, SqlCompletions};
 
 actions!(query_tab, [RunQuery, RunScript, CancelQuery, FormatSql]);
+
+/// What a tab needs to open a cursor on its own connection (a cursor lives in a transaction,
+/// so it cannot share the session's connection with other tabs).
+#[derive(Clone)]
+pub struct ConnectSpec {
+    pub profile: pgroove_core::ConnectionProfile,
+    pub secrets: Arc<dyn SecretStore>,
+}
+
+/// How a run ended up being served.
+enum Served {
+    /// A cursor, with its first batch.
+    Cursor(RowCursor, Arc<ResultSet>, std::time::Duration),
+    /// The ordinary limited run (scripts, statements a cursor can't read).
+    Plain(QueryOutput),
+}
+
+/// A fetched batch of rows, and whether the result is now complete.
+type Batch = (Vec<Vec<Option<String>>>, bool);
+
+/// The open cursor of the shown result.
+type SharedCursor = Arc<tokio::sync::Mutex<RowCursor>>;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RunState {
@@ -93,8 +117,27 @@ pub struct QueryTab {
     session: Option<usize>,
     /// Completion data of that database (the editor's provider reads it).
     index: SharedIndex,
-    /// Rows a run returns at most; larger results go through Export.
+    /// Rows fetched at a time; a script's results show at most this many.
     row_limit: u32,
+    /// How to open a cursor connection for this tab's database.
+    connect: Option<ConnectSpec>,
+    /// The cursor of the shown result while more rows can be fetched from it.
+    cursor: Option<SharedCursor>,
+    /// Cancels a fetch running on the cursor's connection.
+    cursor_cancel: Option<pgroove_core::cursor::CancelToken>,
+    /// Counts runs, so a batch arriving for an earlier result is dropped.
+    run_gen: u64,
+    /// A batch is being fetched.
+    fetching: bool,
+    /// The shown result came from a cursor (scrolling loads more of it).
+    cursor_result: bool,
+    /// Rows of that result loaded so far. Kept here because the grid asks for more while it
+    /// is itself being updated and cannot be read then.
+    loaded: usize,
+    /// Loading stopped at the cap with more rows left.
+    capped: bool,
+    /// Why loading more failed, if it did.
+    fetch_error: Option<String>,
     /// Editor above, results below; the divider can be dragged.
     split: Entity<ResizableState>,
     editor_height: f32,
@@ -176,6 +219,15 @@ impl QueryTab {
             session: None,
             index: completions,
             row_limit: pgroove_core::settings::clamp_row_limit(row_limit),
+            connect: None,
+            cursor: None,
+            cursor_cancel: None,
+            run_gen: 0,
+            fetching: false,
+            cursor_result: false,
+            loaded: 0,
+            capped: false,
+            fetch_error: None,
         }
     }
 
@@ -205,12 +257,24 @@ impl QueryTab {
         session: Option<usize>,
         client: Option<Arc<pgroove_core::Client>>,
         index: Option<pgroove_core::completion::Index>,
+        connect: Option<ConnectSpec>,
         cx: &mut Context<Self>,
     ) {
         self.session = session;
         self.client = client;
+        self.connect = connect;
         self.set_index(index);
+        // A cursor belongs to the connection it was opened for.
+        self.drop_cursor();
         cx.notify();
+    }
+
+    /// Closes the open cursor (its connection ends with it) and forgets a pending fetch.
+    fn drop_cursor(&mut self) {
+        self.cursor = None;
+        self.cursor_cancel = None;
+        self.fetching = false;
+        self.run_gen += 1;
     }
 
     /// Replaces the completion data without changing the binding.
@@ -316,17 +380,43 @@ impl QueryTab {
             return;
         }
         let limit = self.row_limit as usize;
+        // One plain query can be read through a cursor, so more of it loads as you scroll.
+        let cursor_text = match pgroove_core::sqlsplit::split_statements(&sql).as_slice() {
+            [one] if pgroove_core::sqlsplit::is_select_like(&one.text) => Some(one.text.clone()),
+            _ => None,
+        };
+        let spec = self.connect.clone().filter(|_| cursor_text.is_some());
+        // The new run replaces the shown result, and with it the old cursor.
+        self.drop_cursor();
+        let generation = self.run_gen;
         self.clear_diagnostics(cx);
         self.run = RunState::Running;
         cx.notify();
         let run_sql = sql.clone();
-        let task = self
-            .runtime
-            .spawn(async move { query::run_limited(&client, &run_sql, limit).await });
+        let task = self.runtime.spawn(async move {
+            if let (Some(spec), Some(text)) = (spec, cursor_text) {
+                let start = std::time::Instant::now();
+                let password = spec.secrets.get(&spec.profile.name).ok().flatten();
+                match RowCursor::open(&spec.profile, password.as_deref(), &text, limit).await {
+                    Ok(Some((cursor, set))) => {
+                        return Ok(Served::Cursor(cursor, Arc::new(set), start.elapsed()));
+                    }
+                    Ok(None) => log::debug!("the server declined a cursor for this statement"),
+                    Err(e) => log::warn!("no cursor, running the query plainly: {e:#}"),
+                }
+            }
+            query::run_limited(&client, &run_sql, limit)
+                .await
+                .map(Served::Plain)
+        });
         cx.spawn(async move |this, cx| {
             let result = split_result(task.await, &sql);
-            this.update(cx, |this, cx| this.finish_query(&sql, base, result, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                if this.run_gen == generation {
+                    this.finish_query(&sql, base, result, cx)
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -335,11 +425,13 @@ impl QueryTab {
         &mut self,
         sql: &str,
         base: usize,
-        result: Result<QueryOutput, RunFailure>,
+        result: Result<Served, RunFailure>,
         cx: &mut Context<Self>,
     ) {
+        self.capped = false;
+        self.fetch_error = None;
         match result {
-            Ok(out) => {
+            Ok(Served::Plain(out)) => {
                 self.record(sql, out.elapsed.as_millis() as u64, true);
                 self.run = RunState::Idle;
                 let set = out.last_rowset_shared();
@@ -349,8 +441,38 @@ impl QueryTab {
                     BottomTab::Messages
                 };
                 // The grid shares this tab's allocation instead of cloning the rows.
-                self.results.update(cx, |p, cx| p.set_data(set, cx));
+                self.cursor_result = false;
+                self.results.update(cx, |p, cx| {
+                    p.set_data(set, cx);
+                    p.set_more(None, false, cx);
+                });
                 self.output = Some(out);
+            }
+            Ok(Served::Cursor(cursor, set, elapsed)) => {
+                self.record(sql, elapsed.as_millis() as u64, true);
+                self.run = RunState::Idle;
+                self.bottom = BottomTab::Results;
+                self.cursor_result = true;
+                self.loaded = set.rows.len();
+                let more = !cursor.is_done();
+                self.cursor_cancel = Some(cursor.cancel_token());
+                // A finished result keeps no cursor, so its connection closes at once.
+                self.cursor = more.then(|| Arc::new(tokio::sync::Mutex::new(cursor)));
+                let loader: Option<crate::results::MoreLoader> = more.then(|| {
+                    let weak = cx.weak_entity();
+                    std::rc::Rc::new(move |cx: &mut App| {
+                        weak.update(cx, |tab, cx| tab.fetch_more(cx)).ok();
+                    }) as crate::results::MoreLoader
+                });
+                self.results.update(cx, |p, cx| {
+                    p.set_data(Some(set.clone()), cx);
+                    p.set_more(loader, more, cx);
+                });
+                self.output = Some(QueryOutput {
+                    sets: vec![set],
+                    elapsed,
+                    limit: None,
+                });
             }
             Err(f) => {
                 self.record(sql, 0, false);
@@ -361,6 +483,72 @@ impl QueryTab {
                 self.bottom = BottomTab::Messages;
             }
         }
+        cx.notify();
+    }
+
+    /// Fetches the next batch of the shown result (the grid asked: it was scrolled near the end).
+    fn fetch_more(&mut self, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        if self.fetching {
+            return;
+        }
+        if self.loaded >= MAX_LOADED_ROWS {
+            self.stop_loading(true, None, cx);
+            return;
+        }
+        self.fetching = true;
+        let (generation, batch) = (self.run_gen, self.row_limit as usize);
+        cx.notify();
+        let task = self.runtime.spawn(async move {
+            let mut cursor = cursor.lock().await;
+            let set = cursor.fetch(batch).await?;
+            anyhow::Ok((set.rows, cursor.is_done()))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            };
+            this.update(cx, |this, cx| {
+                if this.run_gen == generation {
+                    this.batch_arrived(result, cx)
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A fetched batch reached the tab: add it to the grid, or stop loading on a failure.
+    fn batch_arrived(&mut self, result: Result<Batch, String>, cx: &mut Context<Self>) {
+        self.fetching = false;
+        match result {
+            Ok((rows, done)) => {
+                self.loaded += rows.len();
+                let total = self.loaded;
+                let capped = !done && total >= MAX_LOADED_ROWS;
+                let more = !done && !capped;
+                self.results
+                    .update(cx, |p, cx| p.append_rows(rows, Vec::new(), more, cx));
+                if !more {
+                    self.stop_loading(capped, None, cx);
+                }
+            }
+            Err(e) => self.stop_loading(false, Some(e), cx),
+        }
+        cx.notify();
+    }
+
+    /// No more fetching for the shown result: closes the cursor (and its connection).
+    fn stop_loading(&mut self, capped: bool, error: Option<String>, cx: &mut Context<Self>) {
+        self.cursor = None;
+        self.cursor_cancel = None;
+        self.fetching = false;
+        self.capped = capped;
+        self.fetch_error = error;
+        self.results.update(cx, |p, cx| p.set_more(None, false, cx));
         cx.notify();
     }
 
@@ -436,6 +624,17 @@ impl QueryTab {
     }
 
     fn cancel_query(&mut self, cx: &mut Context<Self>) {
+        // A batch being fetched is cancelled on the cursor's own connection.
+        if self.fetching
+            && let Some(token) = self.cursor_cancel.clone()
+        {
+            self.runtime.spawn(async move {
+                if let Err(e) = pgroove_core::cursor::cancel(&token).await {
+                    log::warn!("cancel failed: {e:#}");
+                }
+            });
+            return;
+        }
         if self.run != RunState::Running {
             return;
         }
@@ -714,12 +913,11 @@ impl QueryTab {
         Button::new("row-limit")
             .outline()
             .xsmall()
-            .label(format!("Limit {} rows", format_limit(current)))
-            .tooltip(format!(
-                "Run returns at most this many rows (up to {}). \
-                 Use Export CSV for larger results.",
-                format_limit(pgroove_core::settings::MAX_ROW_LIMIT)
-            ))
+            .label(format!("Fetch {} rows", format_limit(current)))
+            .tooltip(
+                "Rows fetched at a time. A query's result loads more as you scroll; a script \
+                 shows only this many per statement. Export CSV streams a whole result.",
+            )
             .dropdown_menu(move |menu, _, _| {
                 pgroove_core::settings::ROW_LIMIT_PRESETS
                     .iter()
@@ -756,6 +954,23 @@ impl QueryTab {
         };
         let summary = match (&self.run, &self.output) {
             (RunState::Running, _) => "Running…".to_string(),
+            (_, Some(o)) if self.cursor_result => {
+                let n = self.loaded;
+                let tail = if self.fetching {
+                    " · loading more…"
+                } else if self.cursor.is_some() {
+                    " · scroll for more"
+                } else if self.capped {
+                    " · stopped at the limit"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} rows{tail} · {} ms",
+                    format_limit(n as u32),
+                    o.elapsed.as_millis()
+                )
+            }
             (_, Some(o)) => {
                 let n = o.last_rowset().map(|s| s.rows.len()).unwrap_or(0);
                 match o.limit {
@@ -811,7 +1026,32 @@ impl QueryTab {
             return note(text, theme.foreground);
         }
         if let Some(set) = self.output.as_ref().and_then(|o| o.last_rowset()) {
-            let banner = set.truncated.then(|| {
+            let notice = if self.cursor_result {
+                self.fetch_error
+                    .as_ref()
+                    .map(|e| format!("Couldn't load more rows: {e}"))
+                    .or_else(|| {
+                        self.capped.then(|| {
+                            format!(
+                                "Loaded the first {} rows. The result has more: export it to \
+                                 get everything.",
+                                format_limit(MAX_LOADED_ROWS as u32)
+                            )
+                        })
+                    })
+            } else {
+                set.truncated.then(|| {
+                    format!(
+                        "Showing only the first {} rows: the query has more. Raise the limit \
+                         (up to {}) or export the whole result.",
+                        format_limit(set.rows.len() as u32),
+                        format_limit(pgroove_core::settings::MAX_ROW_LIMIT),
+                    )
+                })
+            };
+            let exportable =
+                self.cursor_result && self.fetch_error.is_none() || !self.cursor_result;
+            let banner = notice.map(|text| {
                 h_flex()
                     .gap_3()
                     .px_3()
@@ -820,13 +1060,8 @@ impl QueryTab {
                     .flex_shrink_0()
                     .text_xs()
                     .bg(theme.warning.opacity(0.14))
-                    .child(format!(
-                        "Showing only the first {} rows: the query has more. Raise the limit \
-                         (up to {}) or export the whole result.",
-                        format_limit(set.rows.len() as u32),
-                        format_limit(pgroove_core::settings::MAX_ROW_LIMIT),
-                    ))
-                    .child(
+                    .child(text)
+                    .children(exportable.then(|| {
                         Button::new("export-banner")
                             .outline()
                             .xsmall()
@@ -834,8 +1069,8 @@ impl QueryTab {
                             .label("Export all rows…")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.export_csv(window, cx)),
-                            ),
-                    )
+                            )
+                    }))
             });
             v_flex()
                 .flex_1()

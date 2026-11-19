@@ -187,7 +187,7 @@ impl Workspace {
             if let TabKind::Query(q, _) = t
                 && q.read(cx).session() == Some(id)
             {
-                q.update(cx, |q, cx| q.bind(None, None, None, cx));
+                q.update(cx, |q, cx| q.bind(None, None, None, None, cx));
             }
         }
         if self.last_session == Some(id) {
@@ -213,8 +213,8 @@ impl Workspace {
 
     /// Binds query tabs that have no database yet to a newly ready one.
     fn bind_unbound_queries(&mut self, id: usize, cx: &mut Context<Self>) {
-        let (client, index) = match self.session(id) {
-            Some(s) => (s.client.clone(), s.index.clone()),
+        let (client, index, connect) = match self.session(id) {
+            Some(s) => (s.client.clone(), s.index.clone(), self.connect_spec(s)),
             None => return,
         };
         for t in &self.tabs {
@@ -222,7 +222,7 @@ impl Workspace {
                 && q.read(cx).session().is_none()
             {
                 q.update(cx, |q, cx| {
-                    q.bind(Some(id), client.clone(), index.clone(), cx)
+                    q.bind(Some(id), client.clone(), index.clone(), connect.clone(), cx)
                 });
             }
         }
@@ -239,7 +239,18 @@ impl Workspace {
             .and_then(|id| self.session(id))
             .map_or((None, None), |s| (s.client.clone(), s.index.clone()));
         let id = id.filter(|_| client.is_some());
-        tab.update(cx, |q, cx| q.bind(id, client, index, cx));
+        let connect = id
+            .and_then(|id| self.session(id))
+            .and_then(|s| self.connect_spec(s));
+        tab.update(cx, |q, cx| q.bind(id, client, index, connect, cx));
+    }
+
+    /// What a query tab needs to open a cursor connection to a database.
+    fn connect_spec(&self, s: &DbSession) -> Option<crate::query_tab::ConnectSpec> {
+        Some(crate::query_tab::ConnectSpec {
+            profile: s.profile.clone(),
+            secrets: self.secrets.clone(),
+        })
     }
 
     fn load_schemas(&mut self, id: usize, cx: &mut Context<Self>) {

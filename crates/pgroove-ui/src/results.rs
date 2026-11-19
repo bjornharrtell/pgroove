@@ -1,5 +1,6 @@
 //! Result grid backed by gpui-kit's table.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -26,6 +27,9 @@ pub enum CopyAs {
     Json,
     Markdown,
 }
+
+/// Asks for the next batch of rows of a result that has more.
+pub type MoreLoader = Rc<dyn Fn(&mut App)>;
 
 /// What the grid draws in a cell.
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +148,14 @@ pub struct ResultsTable {
     pending_sort: Option<Option<(usize, bool)>>,
     /// Staged edits; when present, cells are read through it.
     session: Option<EditSession>,
+    /// Rows fetched after the shared set (infinite scroll), in order.
+    extra: Vec<Vec<Option<String>>>,
+    /// Asks for the next batch of rows; set while the result has more to fetch.
+    more: Option<MoreLoader>,
+    /// The result has more rows than loaded.
+    has_more: bool,
+    /// A batch has been asked for and has not arrived yet.
+    loading_more: bool,
     /// The cells the user has marked (drag, Shift, Ctrl/Cmd).
     selection: CellSelection,
     /// A mouse press just changed the selection; the click's `SelectCell` event that follows
@@ -258,9 +270,60 @@ impl ResultsTable {
             .map_or(self.row_count(), EditSession::row_count)
     }
 
-    /// Rows in the shared result set (staged inserts excluded).
+    /// Rows loaded: the shared result set plus later batches (staged inserts excluded).
     fn row_count(&self) -> usize {
-        self.set.as_ref().map_or(0, |s| s.rows.len())
+        self.set.as_ref().map_or(0, |s| s.rows.len()) + self.extra.len()
+    }
+
+    /// Sets (or clears) how the grid asks for more rows when scrolled near the end.
+    pub fn set_loader(&mut self, loader: Option<MoreLoader>) {
+        self.more = loader;
+    }
+
+    /// Marks that more rows exist (or not) without adding any.
+    pub fn set_has_more(&mut self, more: bool) {
+        self.has_more = more;
+        self.loading_more = false;
+    }
+
+    /// Adds a fetched batch below the loaded rows. Marked cells and the scroll position stay.
+    /// `ids` are the rows' `(ctid, xmin)` pairs, for a staged-edit session that needs them.
+    /// Returns true when the row-number column had to widen (the kit must rebuild its columns).
+    pub fn append(
+        &mut self,
+        rows: Vec<Vec<Option<String>>>,
+        ids: Vec<(String, String)>,
+        more: bool,
+    ) -> bool {
+        // With a session, it is the one that holds (and shows) the rows.
+        let mut more = more;
+        match self.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = session.extend(rows, ids) {
+                    log::warn!("could not add the next rows to the edit session: {e:#}");
+                    more = false;
+                }
+            }
+            None => self.extra.extend(rows),
+        }
+        self.has_more = more;
+        self.loading_more = false;
+        let gutter = gutter_width(self.row_total());
+        let widened = (gutter - self.gutter).abs() > f32::EPSILON;
+        self.gutter = gutter;
+        widened
+    }
+
+    /// The loaded rows as one result set, in the shape a copy or save needs.
+    fn merged(&self) -> Option<Arc<ResultSet>> {
+        let base = self.set.as_ref()?;
+        if self.extra.is_empty() {
+            return Some(base.clone());
+        }
+        let mut all = (**base).clone();
+        all.rows.extend(self.extra.iter().cloned());
+        all.count = all.rows.len() as u64;
+        Some(Arc::new(all))
     }
 
     pub fn names(&self) -> &[String] {
@@ -271,9 +334,10 @@ impl ResultsTable {
         self.set.as_deref().map_or(&[], |s| s.rows.as_slice())
     }
 
-    /// The shared data, for a copy or save that must not clone the rows.
+    /// The loaded data, for a copy or save. A single batch is shared, not cloned; rows loaded
+    /// later are merged into a copy.
     pub fn data(&self) -> Option<Arc<ResultSet>> {
-        self.set.clone()
+        self.merged()
     }
 
     pub fn column_name(&self, ix: usize) -> Option<&str> {
@@ -294,6 +358,9 @@ impl ResultsTable {
             Some(s) => {
                 self.session = None;
                 self.selection.clear();
+                self.extra.clear();
+                self.has_more = false;
+                self.loading_more = false;
                 self.numeric = (0..s.columns.len())
                     .map(|i| is_numeric(&s.rows, i))
                     .collect();
@@ -323,6 +390,9 @@ impl ResultsTable {
             None => {
                 self.session = None;
                 self.selection.clear();
+                self.extra.clear();
+                self.has_more = false;
+                self.loading_more = false;
                 self.set = None;
                 self.columns.clear();
                 self.numeric.clear();
@@ -358,7 +428,12 @@ impl ResultsTable {
         if let Some(s) = &self.session {
             return s.value(row, col);
         }
-        self.rows().get(row)?.get(col)?.as_deref()
+        let base = self.rows();
+        let line = match base.get(row) {
+            Some(line) => line,
+            None => self.extra.get(row - base.len())?,
+        };
+        line.get(col)?.as_deref()
     }
 
     /// The server's type name of data column `col`, when the result was described.
@@ -387,6 +462,22 @@ impl TableDelegate for ResultsTable {
 
     fn rows_count(&self, _: &App) -> usize {
         self.row_total()
+    }
+
+    fn has_more(&self, _: &App) -> bool {
+        self.has_more && !self.loading_more && self.more.is_some()
+    }
+
+    /// Ask for the next batch while this many rows are still below the visible ones.
+    fn load_more_threshold(&self) -> usize {
+        50
+    }
+
+    fn load_more(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) {
+        if let Some(more) = self.more.clone() {
+            self.loading_more = true;
+            more(cx);
+        }
     }
 
     fn column(&self, col_ix: usize, cx: &App) -> Column {
@@ -696,6 +787,49 @@ mod tests {
 
     fn shared(set: ResultSet) -> Option<Arc<ResultSet>> {
         Some(Arc::new(set))
+    }
+
+    #[test]
+    fn later_batches_extend_the_result() {
+        let mut t = ResultsTable::default();
+        let first = ResultSet {
+            columns: vec!["a".into()],
+            rows: (1..=3).map(|n| vec![Some(n.to_string())]).collect(),
+            count: 3,
+            truncated: true,
+            types: vec![],
+        };
+        let base = Arc::new(first);
+        t.set(Some(base.clone()));
+        t.has_more = true;
+        assert_eq!((t.row_count(), t.row_total()), (3, 3));
+        assert!(
+            Arc::ptr_eq(&t.data().unwrap(), &base),
+            "one batch is shared, not copied"
+        );
+        // A second batch continues the numbering; reading crosses the seam.
+        let widened = t.append(vec![vec![Some("4".into())], vec![None]], vec![], true);
+        assert!(!widened && t.has_more && !t.loading_more);
+        assert_eq!((t.row_count(), t.row_total()), (5, 5));
+        assert_eq!(t.cell(2, 0), Some("3"));
+        assert_eq!(t.cell(3, 0), Some("4"));
+        assert_eq!(t.cell(4, 0), None, "a NULL in the later batch");
+        assert_eq!(t.cell(5, 0), None, "past the end");
+        // Copy and save see every loaded row.
+        let all = t.data().unwrap();
+        assert_eq!(all.rows.len(), 5);
+        assert_eq!(all.count, 5);
+        // Marked cells survive an append; the end of the result clears the flag.
+        t.press((3, 0), crate::selection::Mods::default());
+        t.append(vec![], vec![], false);
+        assert!(!t.has_more);
+        assert_eq!(t.selection().cell_count(), 1);
+        // The row-number column widens when the row count gains a digit.
+        let many: Vec<Vec<Option<String>>> = vec![vec![None]; 1000];
+        assert!(t.append(many, vec![], false));
+        // New data starts over.
+        t.set(Some(base));
+        assert_eq!(t.row_count(), 3);
     }
 
     #[test]

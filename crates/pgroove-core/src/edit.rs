@@ -50,6 +50,23 @@ pub enum RowIdentity {
     None,
 }
 
+/// Fails when a `(ctid, xmin)` pair isn't what the server produces.
+fn check_row_ids(ids: &[(String, String)]) -> Result<()> {
+    let valid_ctid = |c: &str| {
+        c.starts_with('(')
+            && c.ends_with(')')
+            && c[1..c.len() - 1].split(',').count() == 2
+            && c[1..c.len() - 1]
+                .split(',')
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let valid_xmin = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if let Some((c, x)) = ids.iter().find(|(c, x)| !valid_ctid(c) || !valid_xmin(x)) {
+        bail!("unexpected row id ({c}, {x})");
+    }
+    Ok(())
+}
+
 /// How a session addresses a loaded row.
 #[derive(Debug, Clone)]
 enum Key {
@@ -106,18 +123,7 @@ impl EditSession {
         if ids.len() != rows.len() {
             bail!("row ids do not match the loaded rows");
         }
-        let valid_ctid = |c: &str| {
-            c.starts_with('(')
-                && c.ends_with(')')
-                && c[1..c.len() - 1].split(',').count() == 2
-                && c[1..c.len() - 1]
-                    .split(',')
-                    .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        };
-        let valid_xmin = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
-        if let Some((c, x)) = ids.iter().find(|(c, x)| !valid_ctid(c) || !valid_xmin(x)) {
-            bail!("unexpected row id ({c}, {x})");
-        }
+        check_row_ids(&ids)?;
         Ok(Self {
             columns,
             key: Key::RowIds(ids),
@@ -126,6 +132,23 @@ impl EditSession {
             deleted: BTreeSet::new(),
             inserts: Vec::new(),
         })
+    }
+
+    /// Adds rows loaded after the first batch (infinite scroll). Staged inserts keep their
+    /// place at the end, so their row numbers move down by the rows added. `ids` is needed,
+    /// one per row, for a session that addresses rows by `(ctid, xmin)`.
+    pub fn extend(&mut self, rows: Vec<Vec<Cell>>, ids: Vec<(String, String)>) -> Result<()> {
+        if let Key::RowIds(known) = &mut self.key {
+            if ids.len() != rows.len() {
+                bail!("row ids do not match the loaded rows");
+            }
+            check_row_ids(&ids)?;
+            known.extend(ids);
+        }
+        // Edits and deletes are keyed by original row numbers, which don't change. Staged
+        // inserts move down with the rows added before them, so nothing is keyed to them.
+        self.original.extend(rows);
+        Ok(())
     }
 
     pub fn columns(&self) -> &[String] {
@@ -558,6 +581,40 @@ mod tests {
                 .sql
                 .ends_with("where \"a\" = '1' and \"b\" = '2'")
         );
+    }
+
+    #[test]
+    fn later_batches_extend_a_session() {
+        // By primary key: rows after the first batch are editable like the rest, and staged
+        // inserts stay at the end.
+        let mut e = session();
+        e.add_insert(vec![InsertValue::Default; 3]);
+        assert_eq!((e.row_count(), e.is_inserted(3)), (4, true));
+        e.extend(vec![vec![s("4"), s("d"), None]], vec![]).unwrap();
+        assert_eq!(
+            (e.row_count(), e.is_inserted(3), e.is_inserted(4)),
+            (5, false, true)
+        );
+        e.set_value(3, 1, s("dd"));
+        let sql: Vec<_> = e.statements(&t()).into_iter().map(|x| x.sql).collect();
+        assert!(
+            sql.iter()
+                .any(|q| q.contains("update") && q.contains("'dd'") && q.contains("'4'"))
+        );
+        // By row id: every new row needs one, and a bad one is refused.
+        let cols = vec!["a".to_string()];
+        let first = vec![vec![s("1")]];
+        let ids = vec![("(0,1)".to_string(), "700".to_string())];
+        let mut r = EditSession::with_row_ids(cols, first, ids).unwrap();
+        assert!(r.extend(vec![vec![s("2")]], vec![]).is_err());
+        let bad = vec![("(0,2)'; drop table x; --".to_string(), "1".to_string())];
+        assert!(r.extend(vec![vec![s("2")]], bad).is_err());
+        assert_eq!(r.row_count(), 1, "a refused batch adds nothing");
+        r.extend(vec![vec![s("2")]], vec![("(0,2)".into(), "701".into())])
+            .unwrap();
+        r.set_value(1, 0, s("9"));
+        let sql: Vec<_> = r.statements(&t()).into_iter().map(|x| x.sql).collect();
+        assert!(sql[0].contains("ctid = '(0,2)'::tid"));
     }
 
     #[test]

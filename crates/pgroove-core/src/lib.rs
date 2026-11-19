@@ -4,6 +4,7 @@ pub mod atomic;
 pub mod catalog;
 pub mod completion;
 pub mod connect;
+pub mod cursor;
 pub mod data;
 pub mod ddl;
 pub mod edit;

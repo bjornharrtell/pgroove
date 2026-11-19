@@ -9,6 +9,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::*;
+use pgroove_core::cursor::MAX_LOADED_ROWS;
 use pgroove_core::data::{self, PageRequest, Sort, TableRef};
 use pgroove_core::edit::{self, EditSession, InsertValue, RowIdentity};
 use tokio::runtime::Runtime;
@@ -41,7 +42,12 @@ pub struct TableView {
     runtime: Arc<Runtime>,
     pane: Entity<GridPane>,
     filter: Entity<InputState>,
-    page: u64,
+    /// The next batch to fetch as the grid is scrolled (batch 0 is the first, loaded on reload).
+    next_page: u64,
+    /// A batch is being fetched.
+    fetching_more: bool,
+    /// Loading stopped at the cap with more rows left.
+    capped: bool,
     sort: Option<Sort>,
     applied_filter: Option<String>,
     load: Load,
@@ -56,13 +62,21 @@ pub struct TableView {
     _subs: Vec<Subscription>,
 }
 
-/// Human-readable row range for a page, e.g. `201–400`.
-pub fn range_label(page: u64, page_size: u32, rows: usize) -> String {
+/// What the data viewer says about the rows it has loaded, e.g. `400 rows · scroll for more`.
+pub fn loaded_label(rows: usize, more: bool, fetching: bool, capped: bool) -> String {
     if rows == 0 {
         return "No rows".into();
     }
-    let first = page * u64::from(page_size) + 1;
-    format!("{}–{}", first, first + rows as u64 - 1)
+    let n = format_limit(rows as u32);
+    if fetching {
+        format!("{n} rows · loading…")
+    } else if more {
+        format!("{n} rows · scroll for more")
+    } else if capped {
+        format!("{n} rows · stopped at the limit")
+    } else {
+        format!("{n} rows")
+    }
 }
 
 impl EventEmitter<OpenTable> for TableView {}
@@ -119,7 +133,9 @@ impl TableView {
             runtime,
             pane,
             filter,
-            page: 0,
+            next_page: 1,
+            fetching_more: false,
+            capped: false,
             sort: None,
             applied_filter: None,
             load: Load::Loading,
@@ -503,7 +519,6 @@ impl TableView {
         let shown = req.filter(|_| self.sort.is_some());
         let grid = self.pane.read(cx).grid().clone();
         grid.update(cx, |g, _| g.delegate_mut().set_sorted(shown));
-        self.page = 0;
         self.reload(cx);
     }
 
@@ -513,18 +528,16 @@ impl TableView {
         }
         let text = self.filter.read(cx).value().trim().to_string();
         self.applied_filter = (!text.is_empty()).then_some(text);
-        self.page = 0;
         self.reload(cx);
     }
 
-    /// Uses another page size (from another tab's choice) and returns to the first page.
+    /// Uses another batch size (from another tab's choice) and reloads from the first row.
     pub(crate) fn apply_page_size(&mut self, size: u32, cx: &mut Context<Self>) {
         let size = pgroove_core::settings::clamp_row_limit(size);
         if size == self.page_size || self.pending(cx) > 0 {
             return;
         }
         self.page_size = size;
-        self.page = 0;
         self.reload(cx);
     }
 
@@ -617,8 +630,8 @@ impl TableView {
         Button::new("page-size")
             .ghost()
             .xsmall()
-            .label(format!("{} rows/page", format_limit(current)))
-            .tooltip("Rows per page")
+            .label(format!("{} rows/batch", format_limit(current)))
+            .tooltip("Rows fetched at a time; more load as you scroll")
             .dropdown_menu(move |menu, _, _| {
                 pgroove_core::settings::ROW_LIMIT_PRESETS
                     .iter()
@@ -635,20 +648,15 @@ impl TableView {
             })
     }
 
-    fn go(&mut self, page: u64, cx: &mut Context<Self>) {
-        if self.blocked_by_pending(cx) {
-            return;
-        }
-        self.page = page;
-        self.reload(cx);
-    }
-
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
         self.load = Load::Loading;
+        self.next_page = 1;
+        self.fetching_more = false;
+        self.capped = false;
         cx.notify();
-        let mut req = PageRequest::page(self.page, u64::from(self.page_size));
+        let mut req = PageRequest::page(0, u64::from(self.page_size));
         req.sort = self.sort.clone();
         req.filter = self.applied_filter.clone();
         let (client, table) = (self.client.clone(), self.table.clone());
@@ -699,6 +707,14 @@ impl TableView {
                             RowIdentity::None
                         };
                         this.pane.update(cx, |p, cx| p.set_session(session, cx));
+                        let loader: Option<crate::results::MoreLoader> = page.has_more.then(|| {
+                            let weak = cx.weak_entity();
+                            std::rc::Rc::new(move |cx: &mut App| {
+                                weak.update(cx, |view, cx| view.fetch_next(cx)).ok();
+                            }) as crate::results::MoreLoader
+                        });
+                        this.pane
+                            .update(cx, |p, cx| p.set_more(loader, page.has_more, cx));
                         this.load = Load::Ready;
                     }
                     Err(e) => this.load = Load::Failed(e),
@@ -711,10 +727,70 @@ impl TableView {
     }
 }
 
+impl TableView {
+    /// Fetches the next batch of rows (the grid was scrolled near its end) and adds it below
+    /// the rows already shown.
+    fn fetch_next(&mut self, cx: &mut Context<Self>) {
+        if !self.has_more || self.fetching_more || !matches!(self.load, Load::Ready) {
+            return;
+        }
+        if self.rows >= MAX_LOADED_ROWS {
+            self.has_more = false;
+            self.capped = true;
+            cx.notify();
+            return;
+        }
+        self.fetching_more = true;
+        cx.notify();
+        let generation = self.generation;
+        let mut req = PageRequest::page(self.next_page, u64::from(self.page_size));
+        req.sort = self.sort.clone();
+        req.filter = self.applied_filter.clone();
+        req.row_ids = self.identity == RowIdentity::Ctid;
+        let (client, table) = (self.client.clone(), self.table.clone());
+        let task = self
+            .runtime
+            .spawn(async move { data::fetch_page(&client, &table, &req).await });
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            };
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return; // reloaded meanwhile
+                }
+                this.fetching_more = false;
+                match result {
+                    Ok(page) => {
+                        let rows = Arc::try_unwrap(page.data)
+                            .map(|d| d.rows)
+                            .unwrap_or_else(|shared| shared.rows.clone());
+                        this.rows += rows.len();
+                        this.next_page += 1;
+                        this.capped = page.has_more && this.rows >= MAX_LOADED_ROWS;
+                        this.has_more = page.has_more && !this.capped;
+                        let more = this.has_more;
+                        this.pane
+                            .update(cx, |p, cx| p.append_rows(rows, page.row_ids, more, cx));
+                    }
+                    Err(e) => {
+                        this.has_more = false;
+                        this.notice = Some((format!("Couldn't load more rows: {e}"), true));
+                        this.pane.update(cx, |p, cx| p.set_more(None, false, cx));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
 impl Render for TableView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let page = self.page;
         let mode = self.mode;
         let editable = !cx.global::<ReadOnlyMode>().0 && self.identity != RowIdentity::None;
         self.pane.update(cx, |p, cx| p.set_editable(editable, cx));
@@ -774,7 +850,7 @@ impl Render for TableView {
         };
         let status = match self.load {
             Load::Loading => "Loading…".to_string(),
-            _ => range_label(self.page, self.page_size, self.rows),
+            _ => loaded_label(self.rows, self.has_more, self.fetching_more, self.capped),
         };
         v_flex()
             .size_full()
@@ -811,36 +887,12 @@ impl Render for TableView {
                     )
                     .child(self.render_page_size_button(cx))
                     .child(
-                        Button::new("prev")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ChevronLeft)
-                            .tooltip("Previous page")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if page > 0 {
-                                    this.go(page - 1, cx)
-                                }
-                            })),
-                    )
-                    .child(
                         div()
-                            .min_w(px(80.))
+                            .min_w(px(110.))
                             .text_xs()
-                            .text_center()
+                            .text_right()
                             .text_color(theme.muted_foreground)
                             .child(status),
-                    )
-                    .child(
-                        Button::new("next")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ChevronRight)
-                            .tooltip("Next page")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.has_more {
-                                    this.go(page + 1, cx)
-                                }
-                            })),
                     ),
             )
             .child(body)
@@ -850,13 +902,20 @@ impl Render for TableView {
 
 #[cfg(test)]
 mod tests {
-    use super::range_label;
+    use super::loaded_label;
 
     #[test]
-    fn range_labels() {
-        assert_eq!(range_label(0, 200, 0), "No rows");
-        assert_eq!(range_label(0, 200, 200), "1–200");
-        assert_eq!(range_label(2, 200, 5), "401–405");
-        assert_eq!(range_label(1, 1000, 1000), "1001–2000");
+    fn loaded_labels() {
+        assert_eq!(loaded_label(0, false, false, false), "No rows");
+        assert_eq!(
+            loaded_label(200, true, false, false),
+            "200 rows · scroll for more"
+        );
+        assert_eq!(loaded_label(400, true, true, false), "400 rows · loading…");
+        assert_eq!(loaded_label(37, false, false, false), "37 rows");
+        assert_eq!(
+            loaded_label(100_000, false, false, true),
+            "100\u{202f}000 rows · stopped at the limit"
+        );
     }
 }

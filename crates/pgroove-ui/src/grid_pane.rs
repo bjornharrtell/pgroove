@@ -312,6 +312,40 @@ impl GridPane {
         cx.notify();
     }
 
+    /// Sets how the grid fetches more rows when it is scrolled near the end (`None` for a
+    /// result that is complete as loaded), and whether more rows exist.
+    pub fn set_more(
+        &mut self,
+        loader: Option<crate::results::MoreLoader>,
+        has_more: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.grid.update(cx, |g, cx| {
+            let d = g.delegate_mut();
+            d.set_loader(loader);
+            d.set_has_more(has_more);
+            cx.notify();
+        });
+    }
+
+    /// Adds a fetched batch below the rows already shown; `more` says whether rows remain.
+    /// `ids` are the rows' `(ctid, xmin)` pairs when the table is edited by them.
+    pub fn append_rows(
+        &mut self,
+        rows: Vec<Vec<Option<String>>>,
+        ids: Vec<(String, String)>,
+        more: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.grid.update(cx, |g, cx| {
+            if g.delegate_mut().append(rows, ids, more) {
+                g.refresh(cx);
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     /// Copy and save buttons for the current data.
     pub fn actions(&self) -> impl IntoElement {
         let button =

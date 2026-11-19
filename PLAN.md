@@ -87,7 +87,7 @@ All milestones M0–M9 are implemented.
 
 - JSON export writes every value as a string (the text protocol carries no column types).
 - A new row can't be given an explicit NULL; empty and NULL both mean "use the default".
-- Run returns at most the chosen row limit (default 200, up to 10,000); bigger results use Export CSV, which streams one query to a file. Statements run one by one rather than as a single implicit transaction. Each cell is cut at 64 KiB (marked with its full size). Copying or exporting a cut cell gives the shortened text.
+- A single query's result loads in batches as the grid is scrolled (200 by default, up to 10,000 per batch), through a read-only cursor on a separate connection, up to 100,000 rows held in memory; scripts show one batch per statement. The data viewer fetches later batches with `limit`/`offset`, so a very deep scroll gets slower. Export CSV streams a whole query to a file. Statements run one by one rather than as a single implicit transaction. Each cell is cut at 64 KiB (marked with its full size). Copying or exporting a cut cell gives the shortened text.
 - Completion doesn't resolve subqueries or CTE names.
 - Packaging is a release workflow that builds a Linux AppImage and tarball, a macOS arm64 tarball and a Windows zip; no installers or signing. The AppImage build was only tested with a stand-in for `appimagetool`.
 - Not verified by hand: the macOS and Windows apps (CI builds and tests them), and the Wayland window frame.
