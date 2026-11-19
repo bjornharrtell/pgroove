@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
@@ -543,6 +543,8 @@ impl TableDelegate for ResultsTable {
         cx.notify();
     }
 
+    /// The menu for a right-click on a row number (the kit only opens the delegate's menu for
+    /// those; cells carry their own, see `render_td`).
     fn context_menu(
         &mut self,
         _: usize,
@@ -550,26 +552,7 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let state = cx.entity();
-        let item = |label: &'static str, how: CopyAs| {
-            let state = state.clone();
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let copied = state.read(cx).delegate().copy_as(how);
-                if let Some((text, count)) = copied {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    window.push_notification(
-                        format!("Copied {count} cell{}", if count == 1 { "" } else { "s" }),
-                        cx,
-                    );
-                }
-            })
-        };
-        menu.item(item("Copy", CopyAs::Tsv))
-            .item(item("Copy with column names", CopyAs::TsvWithHeaders))
-            .separator()
-            .item(item("Copy as CSV", CopyAs::Csv))
-            .item(item("Copy as JSON", CopyAs::Json))
-            .item(item("Copy as Markdown table", CopyAs::Markdown))
+        copy_menu(menu, &cx.entity())
     }
 
     fn render_td(
@@ -580,10 +563,41 @@ impl TableDelegate for ResultsTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         match col_ix.checked_sub(GUTTER) {
-            Some(col) => self.data_cell(row_ix, col, cx),
-            None => self.gutter_cell(row_ix, cx),
+            // The kit opens the delegate's menu only for rows, and a right-click on a cell
+            // clears that, so each data cell carries its own context menu.
+            Some(col) => {
+                let state = cx.entity();
+                self.data_cell(row_ix, col, cx)
+                    .id(("cell", row_ix * 4096 + col))
+                    .context_menu(move |menu, _, _| copy_menu(menu, &state))
+                    .into_any_element()
+            }
+            None => self.gutter_cell(row_ix, cx).into_any_element(),
         }
     }
+}
+
+/// The right-click menu: copy the marked cells in one of the formats.
+fn copy_menu(menu: PopupMenu, state: &Entity<TableState<ResultsTable>>) -> PopupMenu {
+    let item = |label: &'static str, how: CopyAs| {
+        let state = state.clone();
+        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            let copied = state.read(cx).delegate().copy_as(how);
+            if let Some((text, count)) = copied {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                window.push_notification(
+                    format!("Copied {count} cell{}", if count == 1 { "" } else { "s" }),
+                    cx,
+                );
+            }
+        })
+    };
+    menu.item(item("Copy", CopyAs::Tsv))
+        .item(item("Copy with column names", CopyAs::TsvWithHeaders))
+        .separator()
+        .item(item("Copy as CSV", CopyAs::Csv))
+        .item(item("Copy as JSON", CopyAs::Json))
+        .item(item("Copy as Markdown table", CopyAs::Markdown))
 }
 
 impl ResultsTable {
