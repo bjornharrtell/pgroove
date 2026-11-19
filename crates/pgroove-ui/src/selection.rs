@@ -266,6 +266,39 @@ impl CellSelection {
     }
 }
 
+impl CellSelection {
+    /// The selection as a table of values: the touched columns' names and one row of values per
+    /// touched row, in grid order. NULL stays `None`; a cell inside the touched rows and
+    /// columns that is not marked becomes an empty string.
+    pub fn to_table<'a>(
+        &self,
+        cell: impl Fn(usize, usize) -> Option<&'a str>,
+        names: &[String],
+    ) -> (Vec<String>, Vec<Vec<Option<String>>>) {
+        let cols: Vec<usize> = self.cols().into_iter().collect();
+        let header = cols
+            .iter()
+            .map(|c| names.get(*c).cloned().unwrap_or_default())
+            .collect();
+        let rows = self
+            .rows()
+            .into_iter()
+            .map(|r| {
+                cols.iter()
+                    .map(|c| {
+                        if self.contains(r, *c) {
+                            cell(r, *c).map(str::to_string)
+                        } else {
+                            Some(String::new())
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        (header, rows)
+    }
+}
+
 /// How a SQL NULL is written when cells are copied: the literal word, so it can be told
 /// apart from an empty string.
 pub const NULL_TEXT: &str = "NULL";
@@ -434,5 +467,20 @@ mod tests {
         s.press((0, 2), PLAIN);
         s.release();
         assert_eq!(s.to_tsv(cell, &names, false), "NULL\n");
+        // As a table, NULL stays NULL and unmarked cells between marked ones are empty.
+        s.clear();
+        s.press((0, 2), PLAIN);
+        s.release();
+        s.press((1, 0), CTRL);
+        s.release();
+        let (head, rows) = s.to_table(cell, &names);
+        assert_eq!(head, ["x", "z"]);
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some(String::new()), None],
+                vec![Some("d".to_string()), Some(String::new())]
+            ]
+        );
     }
 }

@@ -25,8 +25,9 @@ Requires PostgreSQL 13 or newer on the server.
   cell inspector with pretty-printed JSON. Select cells freely in any result grid: drag to mark
   a block, Shift-click to extend it, Ctrl/Cmd-click to add more blocks, click a row number for a
   whole row, `Ctrl+A` for everything. `Ctrl+C` copies the marked cells as tab-separated text
-  (paste into a spreadsheet) and `Ctrl+Shift+C` adds the column names. Deleting rows in the data
-  viewer acts on every marked row.
+  (paste into a spreadsheet; NULL is copied as the word `NULL`) and `Ctrl+Shift+C` adds the
+  column names. Right-click the selection to copy it as CSV, JSON or a Markdown table. Deleting
+  rows in the data viewer acts on every marked row.
 - **Table structure:** columns, constraints (foreign keys are links), indexes, triggers,
   sizes and reconstructed DDL.
 - **Editing:** add, duplicate, change and delete rows in any ordinary table, including tables without a primary key (rows are then matched by physical position and version, and a row changed in the meantime is refused). Edits are staged, you review the generated SQL, and it is applied atomically.

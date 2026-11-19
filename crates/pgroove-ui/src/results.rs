@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pgroove_core::edit::{EditSession, InsertValue};
@@ -15,6 +16,16 @@ use crate::selection::{CellSelection, Marking, Mods};
 
 /// Characters of a cell drawn in the grid; the rest is in the inspector.
 const MAX_CELL_CHARS: usize = 300;
+
+/// The formats the marked cells can be copied in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyAs {
+    Tsv,
+    TsvWithHeaders,
+    Csv,
+    Json,
+    Markdown,
+}
 
 /// What the grid draws in a cell.
 #[derive(Debug, PartialEq, Eq)]
@@ -204,6 +215,29 @@ impl ResultsTable {
                 count,
             )
         })
+    }
+
+    /// The marked cells in one of the copy formats, and how many cells that is.
+    pub fn copy_as(&self, how: CopyAs) -> Option<(String, usize)> {
+        match how {
+            CopyAs::Tsv => self.copy_text(false),
+            CopyAs::TsvWithHeaders => self.copy_text(true),
+            _ => {
+                let count = self.selection.cell_count();
+                if count == 0 {
+                    return None;
+                }
+                let (names, rows) = self
+                    .selection
+                    .to_table(|r, c| self.cell(r, c), self.names());
+                let text = match how {
+                    CopyAs::Csv => pgroove_core::export::to_csv(&names, &rows),
+                    CopyAs::Json => pgroove_core::export::to_json(&names, &rows),
+                    _ => pgroove_core::export::to_markdown(&names, &rows),
+                };
+                Some((text, count))
+            }
+        }
     }
 
     pub fn session(&self) -> Option<&EditSession> {
@@ -418,6 +452,35 @@ impl TableDelegate for ResultsTable {
         cx.notify();
     }
 
+    fn context_menu(
+        &mut self,
+        _: usize,
+        menu: PopupMenu,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let state = cx.entity();
+        let item = |label: &'static str, how: CopyAs| {
+            let state = state.clone();
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let copied = state.read(cx).delegate().copy_as(how);
+                if let Some((text, count)) = copied {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    window.push_notification(
+                        format!("Copied {count} cell{}", if count == 1 { "" } else { "s" }),
+                        cx,
+                    );
+                }
+            })
+        };
+        menu.item(item("Copy", CopyAs::Tsv))
+            .item(item("Copy with column names", CopyAs::TsvWithHeaders))
+            .separator()
+            .item(item("Copy as CSV", CopyAs::Csv))
+            .item(item("Copy as JSON", CopyAs::Json))
+            .item(item("Copy as Markdown table", CopyAs::Markdown))
+    }
+
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -465,6 +528,15 @@ impl ResultsTable {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |state, _: &MouseDownEvent, _, cx| {
+                    if !state.delegate().selection.row_marked(row_ix) {
+                        state.delegate_mut().press_row(row_ix, Mods::default());
+                        cx.notify();
+                    }
+                }),
+            )
     }
 
     fn data_cell(&self, row_ix: usize, col_ix: usize, cx: &mut Context<TableState<Self>>) -> Div {
@@ -505,6 +577,19 @@ impl ResultsTable {
                     };
                     state.delegate_mut().press((row_ix, col_ix), mods);
                     cx.notify();
+                }),
+            )
+            // Right-clicking outside the marked cells marks the one under the pointer first,
+            // so the context menu copies what was clicked.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |state, _: &MouseDownEvent, _, cx| {
+                    let d = state.delegate_mut();
+                    if !d.selection.contains(row_ix, col_ix) {
+                        d.press((row_ix, col_ix), Mods::default());
+                        d.selection.release();
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_move(cx.listener(move |state, ev: &MouseMoveEvent, _, cx| {
@@ -555,7 +640,7 @@ fn selection_layer(m: Marking, color: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Jump, ResultsTable, header_tip};
+    use super::{CopyAs, Jump, ResultsTable, header_tip};
     use pgroove_core::query::ResultSet;
     use std::sync::Arc;
 
@@ -744,6 +829,21 @@ mod tests {
         assert!(t.selection_mut().drag_to((1, 1)));
         t.selection_mut().release();
         assert_eq!(t.copy_text(true), Some(("a\tb\n1\tx\n2\tNULL\n".into(), 4)));
+        // The same cells in each copy format (what the right-click menu offers).
+        assert_eq!(t.copy_as(CopyAs::Tsv), Some(("1\tx\n2\tNULL\n".into(), 4)));
+        assert_eq!(
+            t.copy_as(CopyAs::Csv),
+            Some(("a,b\r\n1,x\r\n2,\r\n".into(), 4))
+        );
+        let (json, _) = t.copy_as(CopyAs::Json).unwrap();
+        assert!(json.contains("\"b\": null") && json.contains("\"a\": \"2\""));
+        assert_eq!(
+            t.copy_as(CopyAs::Markdown),
+            Some((
+                "| a | b |\n| --- | --- |\n| 1 | x |\n| 2 | NULL |\n".into(),
+                4
+            ))
+        );
         // The click's own SelectCell keeps the marked block; a keyboard move collapses it.
         // The kit's column index counts the row-number gutter.
         assert_eq!(t.cell_selected((1, 2)), (1, 1));

@@ -51,6 +51,30 @@ pub fn to_json(columns: &[String], rows: &Rows) -> String {
     serde_json::to_string_pretty(&objects).unwrap_or_else(|_| "[]".into())
 }
 
+/// A GitHub-style markdown table with a header row. NULL is written as `NULL`; `|` is escaped
+/// and line breaks become `<br>` so a value never breaks the table.
+pub fn to_markdown(columns: &[String], rows: &Rows) -> String {
+    if columns.is_empty() {
+        return String::new();
+    }
+    let cell = |v: &str| {
+        v.replace('|', "\\|")
+            .replace("\r\n", "<br>")
+            .replace(['\n', '\r'], "<br>")
+    };
+    let line = |fields: Vec<String>| format!("| {} |\n", fields.join(" | "));
+    let mut out = line(columns.iter().map(|c| cell(c)).collect());
+    out.push_str(&line(columns.iter().map(|_| "---".to_string()).collect()));
+    for row in rows {
+        out.push_str(&line(
+            row.iter()
+                .map(|v| v.as_deref().map_or_else(|| "NULL".to_string(), cell))
+                .collect(),
+        ));
+    }
+    out
+}
+
 /// Characters of a value the inspector shows.
 pub const INSPECT_CHARS: usize = 20_000;
 
@@ -117,6 +141,23 @@ pub fn pretty_value(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_tables() {
+        let md = to_markdown(&cols(), &rows());
+        assert_eq!(
+            md,
+            "| id | note |\n| --- | --- |\n| 1 | a,b |\n| 2 | NULL |\n| 3 | say \"hi\"<br>now |\n"
+        );
+        let pipes = to_markdown(&["a|b".into()], &[vec![Some("x|y".into())]]);
+        assert_eq!(pipes, "| a\\|b |\n| --- |\n| x\\|y |\n");
+        assert_eq!(to_markdown(&[], &[]), "");
+        assert_eq!(
+            to_markdown(&["a".into()], &[]),
+            "| a |\n| --- |\n",
+            "no rows still gives the header"
+        );
+    }
 
     fn cols() -> Vec<String> {
         vec!["id".into(), "note".into()]
