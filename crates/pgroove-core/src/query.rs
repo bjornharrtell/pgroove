@@ -496,6 +496,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_limit_trims_only_sets_over_the_limit() {
+        let rows = |n: usize| -> Vec<Vec<Option<String>>> {
+            (0..n).map(|i| vec![Some(i.to_string())]).collect()
+        };
+        let set = |n: usize| ResultSet {
+            columns: vec!["a".into()],
+            rows: rows(n),
+            count: n as u64,
+            ..Default::default()
+        };
+        let sets = apply_limit(vec![set(3), set(2), set(0)], 2);
+        assert_eq!(sets[0].rows, rows(2));
+        assert!(sets[0].truncated);
+        assert_eq!(sets[0].count, 2);
+        assert_eq!(sets[1], set(2), "a set at the limit is left alone");
+        assert_eq!(sets[2], set(0));
+    }
+
+    #[test]
     fn last_rowset_and_messages() {
         let o = out(vec![
             ResultSet {

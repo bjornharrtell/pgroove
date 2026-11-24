@@ -187,6 +187,35 @@ mod tests {
         assert_eq!(build_config(&p, None).get_password(), None);
     }
 
+    #[test]
+    fn tls_connector_builds_for_every_mode() {
+        for mode in [
+            SslMode::Disable,
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyFull,
+        ] {
+            assert!(tls_connector(mode).is_ok(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn no_verify_accepts_any_certificate() {
+        let v = NoVerify(Arc::new(ring::default_provider()));
+        let name = ServerName::try_from("db.example").unwrap();
+        assert!(
+            v.verify_server_cert(
+                &CertificateDer::from(vec![1, 2, 3]),
+                &[],
+                &name,
+                &[],
+                UnixTime::now(),
+            )
+            .is_ok()
+        );
+        assert!(!v.supported_verify_schemes().is_empty());
+    }
+
     #[tokio::test]
     async fn connect_failure_is_error() {
         let p = ConnectionProfile {

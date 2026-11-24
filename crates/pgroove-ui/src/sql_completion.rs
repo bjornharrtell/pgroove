@@ -81,7 +81,17 @@ impl CompletionProvider for SqlCompletions {
 
 #[cfg(test)]
 mod tests {
-    use super::is_trigger;
+    use super::{is_trigger, item_kind};
+    use lsp_types::CompletionItemKind;
+    use pgroove_core::completion::Kind;
+
+    #[test]
+    fn kinds_map_to_lsp_kinds() {
+        assert_eq!(item_kind(Kind::Keyword), CompletionItemKind::KEYWORD);
+        assert_eq!(item_kind(Kind::Schema), CompletionItemKind::MODULE);
+        assert_eq!(item_kind(Kind::Table), CompletionItemKind::STRUCT);
+        assert_eq!(item_kind(Kind::Column), CompletionItemKind::FIELD);
+    }
 
     #[test]
     fn triggers() {
