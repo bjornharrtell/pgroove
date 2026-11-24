@@ -12,9 +12,10 @@
 #   rustup component add llvm-tools-preview
 #   cargo install cargo-llvm-cov        (or the prebuilt action the CI coverage job uses)
 #
-# Like the CI coverage job it runs the whole workspace without PGROOVE_TEST_PG, so the tests that
-# need a database skip themselves and the numbers do not depend on a local server. Lines inside
-# #[cfg(test)] modules count as ordinary lines; they run, so they are almost always covered.
+# It runs the whole workspace like the CI coverage job. CI sets PGROOVE_TEST_PG; set it here too
+# (see the README) to count the tests that need a database, otherwise they skip themselves and
+# database code shows as uncovered. Lines inside #[cfg(test)] modules count as ordinary lines;
+# they run, so they are almost always covered.
 set -eu
 
 minimum="${PATCH_COVERAGE_MIN:-80}"
@@ -48,7 +49,7 @@ if [ ! -s "$work/changed" ]; then
   exit 0
 fi
 
-# Same measurement as the CI coverage job: the whole workspace, no database environment.
+# Same measurement as the CI coverage job: the whole workspace, with PGROOVE_TEST_PG if set.
 cargo llvm-cov --workspace --no-fail-fast --lcov --output-path "$work/lcov.info"
 
 awk -v root="$root" -v minimum="$minimum" -v OFS='\t' '

@@ -179,16 +179,19 @@ Layout: `pgroove-core` (no UI: connections, catalog, queries, editing, monitorin
 
 ### Coverage
 
-CI measures line coverage of the workspace without a database and fails when it drops below the
-floor in the `coverage` job of `.github/workflows/ci.yml` (41%; the revision the floor was set on
-measured 42.15%, and the job writes the number to its step summary and uploads the lcov report).
-The same measurement locally:
+CI measures line coverage of the workspace against a Postgres service (so the tests that need a
+database run) and fails when it drops below the floor in the `coverage` job of
+`.github/workflows/ci.yml` (55%; the revision the floor was set on measured 57.10%, and the job
+writes the number to its step summary and uploads the lcov report). The same measurement locally:
 
 ```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov    # or a prebuilt binary, see the CI job
-cargo llvm-cov --workspace --summary-only
+PGROOVE_TEST_PG=localhost:5432:postgres:secret:postgres cargo llvm-cov --workspace --summary-only
 ```
+
+Without `PGROOVE_TEST_PG` the database tests skip themselves and the total is about 10 points
+lower.
 
 AGENTS.md asks for 80% coverage of new or changed lines, which a workspace total cannot show. For
 that, report the changed lines against a base revision:

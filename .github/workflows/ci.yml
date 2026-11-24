@@ -32,13 +32,23 @@ jobs:
   # for 80% patch coverage on new or changed lines, which a total percentage cannot show, so this
   # job only holds the total and `packaging/patch-coverage.sh <base-revision>` (see the README,
   # Development) reports the changed lines locally.
-  # Measured on 5fc4678 without PGROOVE_TEST_PG, so the tests that need a database skip themselves
-  # and the number does not depend on a server: 42.15% of lines (5345 of 12680). The floor sits a
-  # little below it, so toolchain drift does not trip the job; raise it as coverage improves.
+  # Runs against the same Postgres service as `check`, so the tests that need a database count.
+  # Measured with PGROOVE_TEST_PG set (on PostgreSQL 18 locally): 57.10% of lines (10274 of
+  # 17994). The floor sits a little below it, so toolchain or server drift does not trip the job;
+  # raise it as coverage improves.
   coverage:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
-      LINE_COVERAGE_FLOOR: "41"
+      LINE_COVERAGE_FLOOR: "55"
+      PGROOVE_TEST_PG: "localhost:5432:postgres:pw:postgres"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
