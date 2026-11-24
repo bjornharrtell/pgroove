@@ -53,8 +53,8 @@ Building needs a current stable Rust toolchain; the workspace uses edition 2024.
 cargo run --release -p pgroove-app
 ```
 
-On Linux you need the usual GPUI dependencies (Vulkan, Wayland or X11 and xkbcommon headers,
-fontconfig). See `.github/workflows/ci.yml` for the exact package list.
+On Linux you need the usual GPUI dependencies (Vulkan, Wayland and xkbcommon headers,
+fontconfig). X11 support is turned off, so the app needs a Wayland session (XWayland does not count). See `.github/workflows/ci.yml` for the exact package list.
 
 ## Downloads
 
@@ -66,7 +66,7 @@ Applications, then either right-click it and choose Open, or clear the download 
 `xattr -cr /Applications/pgroove.app`. If macOS says the app is "damaged", it is that flag
 (older builds also lacked a signature); the same command fixes it.
 
-The AppImage relies on the system's graphics libraries (Vulkan, Wayland or X11); make it executable and run it. On first start it installs a launcher entry and icon under
+The AppImage relies on the system's graphics libraries (Vulkan and Wayland; there is no X11 backend); make it executable and run it. On first start it installs a launcher entry and icon under
 `~/.local/share` (set `PGROOVE_NO_INTEGRATION=1` to skip), so it appears in menus and can be
 pinned to a dock:
 

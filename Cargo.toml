@@ -11,7 +11,7 @@ license = "MIT"
 [workspace.dependencies]
 anyhow = "1"
 env_logger = "0.11"
-gpui-kit = { version = "0.10.0", features = ["tree-sitter-sql"] }
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "assets", "tree-sitter-sql"] }
 log = "0.4"
 pgroove-core = { path = "crates/pgroove-core" }
 pgroove-ui = { path = "crates/pgroove-ui" }

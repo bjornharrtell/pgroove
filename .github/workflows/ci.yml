@@ -23,7 +23,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Linux deps
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -50,7 +50,7 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       - uses: Swatinem/rust-cache@v2
       - name: Linux deps
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - name: Measure line coverage
         run: |
           # No --summary-only: that would also strip the per-line detail from the lcov report the
